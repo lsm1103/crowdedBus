@@ -1,0 +1,27 @@
+{
+  "name": "crowded-bus",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "好挤的大巴 — 网页横屏派对游戏（方块占位版）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "smoke": "esbuild scripts/smoke.ts --bundle --format=esm --platform=node --outfile=/tmp/smoke.mjs && node /tmp/smoke.mjs",
+    "probe": "esbuild scripts/probe.ts --bundle --format=esm --platform=node --outfile=/tmp/probe.mjs && node /tmp/probe.mjs",
+    "mcp:meshy": "meshy-mcp-server",
+    "model:build": "esbuild scripts/export-layout.ts --bundle --format=esm --platform=node --outfile=/tmp/crowdedbus-export-layout.mjs --log-level=warning && node /tmp/crowdedbus-export-layout.mjs > assets-src/layout.json && \"${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}\" -b --factory-startup -P scripts/blender/build_models.py -- assets-src/layout.json public/models assets-src/crowded_bus.blend"
+  },
+  "dependencies": {
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@meshy-ai/meshy-mcp-server": "0.4.0",
+    "@types/three": "^0.169.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

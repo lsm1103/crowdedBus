@@ -1,0 +1,9 @@
+[mcp_servers.meshy]
+command = "npx"
+args = ["--no-install", "meshy-mcp-server"]
+cwd = "/Users/xm/Desktop/xm_project/code/game_project/crowdedBus"
+env_vars = ["MESHY_API_KEY"]
+enabled = true
+required = false
+startup_timeout_sec = 60
+tool_timeout_sec = 300

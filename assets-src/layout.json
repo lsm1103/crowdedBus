@@ -1,0 +1,236 @@
+{
+  "interior": {
+    "minX": -2.35,
+    "maxX": 2.35,
+    "minZ": -6.2,
+    "maxZ": 6.2
+  },
+  "doors": [
+    {
+      "id": "front",
+      "zMin": 3.4,
+      "zMax": 5.2
+    },
+    {
+      "id": "back",
+      "zMin": -5.2,
+      "zMax": -3.4
+    }
+  ],
+  "seats": [
+    {
+      "id": 0,
+      "kind": "normal",
+      "x": -1.78,
+      "z": 2.45,
+      "rect": {
+        "minX": -2.35,
+        "maxX": -1.4,
+        "minZ": 1.9000000000000001,
+        "maxZ": 3
+      },
+      "backRect": {
+        "minX": -2.35,
+        "maxX": -2.12,
+        "minZ": 1.9000000000000001,
+        "maxZ": 3
+      }
+    },
+    {
+      "id": 1,
+      "kind": "normal",
+      "x": -1.78,
+      "z": 1.15,
+      "rect": {
+        "minX": -2.35,
+        "maxX": -1.4,
+        "minZ": 0.5999999999999999,
+        "maxZ": 1.7
+      },
+      "backRect": {
+        "minX": -2.35,
+        "maxX": -2.12,
+        "minZ": 0.5999999999999999,
+        "maxZ": 1.7
+      }
+    },
+    {
+      "id": 2,
+      "kind": "normal",
+      "x": -1.78,
+      "z": -1.15,
+      "rect": {
+        "minX": -2.35,
+        "maxX": -1.4,
+        "minZ": -1.7,
+        "maxZ": -0.5999999999999999
+      },
+      "backRect": {
+        "minX": -2.35,
+        "maxX": -2.12,
+        "minZ": -1.7,
+        "maxZ": -0.5999999999999999
+      }
+    },
+    {
+      "id": 3,
+      "kind": "priority",
+      "x": -1.78,
+      "z": -3.7,
+      "rect": {
+        "minX": -2.35,
+        "maxX": -1.4,
+        "minZ": -4.25,
+        "maxZ": -3.1500000000000004
+      },
+      "backRect": {
+        "minX": -2.35,
+        "maxX": -2.12,
+        "minZ": -4.25,
+        "maxZ": -3.1500000000000004
+      }
+    }
+  ],
+  "handrails": [
+    {
+      "id": 0,
+      "x": 0,
+      "z": -4.2
+    },
+    {
+      "id": 1,
+      "x": 0,
+      "z": -2.1
+    },
+    {
+      "id": 2,
+      "x": 0,
+      "z": 0
+    },
+    {
+      "id": 3,
+      "x": 0,
+      "z": 2.1
+    },
+    {
+      "id": 4,
+      "x": 0,
+      "z": 4.2
+    },
+    {
+      "id": 5,
+      "x": 1.45,
+      "z": 0
+    }
+  ],
+  "obstacles": [
+    {
+      "id": 0,
+      "kind": "luggage",
+      "rect": {
+        "minX": 1.05,
+        "maxX": 1.95,
+        "minZ": -1.75,
+        "maxZ": -0.85
+      },
+      "height": 0.78
+    },
+    {
+      "id": 1,
+      "kind": "wheelwell",
+      "rect": {
+        "minX": 1.85,
+        "maxX": 2.35,
+        "minZ": 0.7,
+        "maxZ": 1.9
+      },
+      "height": 0.52
+    },
+    {
+      "id": 2,
+      "kind": "stroller",
+      "rect": {
+        "minX": -2.25,
+        "maxX": -1.35,
+        "minZ": 4.2,
+        "maxZ": 5.1
+      },
+      "height": 0.95
+    },
+    {
+      "id": 3,
+      "kind": "bin",
+      "rect": {
+        "minX": 0.95,
+        "maxX": 1.55,
+        "minZ": 2.85,
+        "maxZ": 3.4
+      },
+      "height": 0.86
+    }
+  ],
+  "platform": {
+    "minX": 2.35,
+    "maxX": 6,
+    "minZ": -5.2,
+    "maxZ": -3.4
+  },
+  "platformFence": {
+    "minX": 6,
+    "maxX": 6.3,
+    "minZ": -5.2,
+    "maxZ": -3.4
+  },
+  "boardingFence": [
+    {
+      "minX": 2.35,
+      "maxX": 6.3,
+      "minZ": -5.5,
+      "maxZ": -5.2
+    },
+    {
+      "minX": 2.35,
+      "maxX": 6.3,
+      "minZ": -3.4,
+      "maxZ": -3.1
+    }
+  ],
+  "walls": [
+    {
+      "minX": -2.65,
+      "maxX": -2.35,
+      "minZ": -6.7,
+      "maxZ": 6.7
+    },
+    {
+      "minX": 2.35,
+      "maxX": 2.65,
+      "minZ": -6.7,
+      "maxZ": -5.2
+    },
+    {
+      "minX": 2.35,
+      "maxX": 2.65,
+      "minZ": -3.4,
+      "maxZ": 3.4
+    },
+    {
+      "minX": 2.35,
+      "maxX": 2.65,
+      "minZ": 5.2,
+      "maxZ": 6.7
+    },
+    {
+      "minX": -2.65,
+      "maxX": 2.65,
+      "minZ": -6.7,
+      "maxZ": -6.4
+    },
+    {
+      "minX": -2.65,
+      "maxX": 2.65,
+      "minZ": 6.4,
+      "maxZ": 6.7
+    }
+  ]
+}

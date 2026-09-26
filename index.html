@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#10233a" />
+    <!-- 安卓微信 X5 内核：请求横屏 + 全屏（iOS 微信不支持，由 CSS 强制旋转兜底） -->
+    <meta name="x5-orientation" content="landscape" />
+    <meta name="x5-fullscreen" content="true" />
+    <meta name="x5-page-mode" content="app" />
+    <meta name="screen-orientation" content="landscape" />
+    <meta name="full-screen" content="yes" />
+    <title>好挤的大巴</title>
+    <style>
+      :root {
+        --c-bg:#12253C; --c-mint:#4ECEB6; --c-coral:#FF7A6B; --c-lemon:#FFD23F; --c-text:#f7fbff;
+        --sa-top:0px; --sa-right:0px; --sa-bottom:0px; --sa-left:0px;
+        /* 舞台的 1% 宽高。orientation.ts 会按舞台实际尺寸覆盖，
+           强制横屏时它和 vw/vh 正好是反的，布局必须用这一对。 */
+        --sw:1vw; --sh:1vh;
+        /*
+         * 触控件（摇杆、动作键）的比例单位 = 1px × 倍率，用法 calc(68 * var(--u))。
+         * 按舞台高度 H 线性放大：倍率 = 1 + 0.4·(H−430)/338，下限 1、上限 1.6。
+         * 手机横屏（H 360~430）恒为 1px，和旧的固定像素逐像素一致；
+         * 1024×768 平板 ≈1.4px；以前尺寸被 clamp 的像素上限卡死，平板上按钮显得很小。
+         */
+        --u:clamp(1px, calc(var(--sh) * 0.11834 + 0.49112px), 1.6px);
+        /*
+         * 放大后动作键额外拉开的间距：上排（技能/抓住）上移、左列（冲刺/抓住）左移。
+         * 旧偏移是按手机上的按钮尺寸调的，尺寸到上限时推挤键和技能键会压住约 5px，
+         * 整组等比放大只会压得更多。手机上 --u 恰为 1px，这一项为 0，不影响逐像素一致。
+         */
+        --spread:clamp(0px, calc((var(--u) - 1px) * 1000), 12px);
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body {
+        margin: 0; padding: 0; width: 100%; height: 100%;
+        background: #05101f; overflow: hidden; position: fixed;
+        font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+        touch-action: none; user-select: none; -webkit-user-select: none;
+        -webkit-touch-callout: none; overscroll-behavior: none;
+      }
+
+      /* 读取真实安全区的探针；orientation.ts 会把它按旋转量重映射成 --sa-*。 */
+      #safe-area-probe {
+        position: fixed; top: 0; left: 0; width: 0; height: 0; visibility: hidden; pointer-events: none;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      }
+
+      /*
+       * 舞台。竖屏时由 orientation.ts 设成 rotate(90deg) 并互换宽高，
+       * 这样在 iOS 微信这种永远不会横过来的 WebView 里也能横屏游玩。
+       */
+      #stage {
+        position: fixed; left: 0; top: 0; width: 100%; height: 100%;
+        transform-origin: 50% 50%; overflow: hidden; background: var(--c-bg);
+      }
+      #app { position: absolute; inset: 0; }
+      canvas { display: block; }
+
+      /*
+       * 竖向尺寸全部跟舞台高度走（--sh）：667×375 这种矮屏上旧的固定 12px 间距 +
+       * 78px 卡片会让大厅内容比屏幕高，居中后"开始上车"离底边不到 8px。
+       * safe center：真放不下时从顶部排、底部可滚动，而不是两头一起裁掉。
+       */
+      .screen {
+        position: absolute; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; justify-content: safe center;
+        gap: clamp(6px, calc(var(--sh) * 2.4), 12px);
+        overflow-y: auto; -webkit-overflow-scrolling: touch;
+        padding: calc(var(--sa-top) + clamp(8px, calc(var(--sh) * 2.6), 14px)) calc(var(--sa-right) + 18px)
+                 calc(var(--sa-bottom) + clamp(8px, calc(var(--sh) * 2.6), 14px)) calc(var(--sa-left) + 18px);
+        background: radial-gradient(900px 520px at 50% -10%, rgba(255,196,120,.30) 0%, transparent 58%), linear-gradient(145deg,#10334e,#10223c 65%,#0c1930);
+        color: var(--c-text); z-index: 30; text-align: center;
+      }
+      .screen.hidden { display: none; }
+      h1 { margin: 0; font-size: clamp(22px, calc(var(--sh) * 5.2), 40px); letter-spacing: 2px; }
+      h1 .accent { color: var(--c-coral); }
+      .sub { margin: 0; font-size: clamp(11px, calc(var(--sh) * 1.9), 15px); color: #a8c3e8; }
+      .hint { margin: 0; font-size: clamp(9px, calc(var(--sh) * 1.5), 12px); color: #7e9cc4; letter-spacing:.3px; }
+      .panel {
+        background:linear-gradient(145deg,rgba(17,53,77,.86),rgba(8,25,46,.84)); border:1px solid rgba(185,238,247,.25);
+        box-shadow:0 18px 48px rgba(2,10,24,.32), inset 0 1px rgba(255,255,255,.12); border-radius:18px;
+        padding:clamp(8px, calc(var(--sh) * 2.4), 12px);
+        max-width:660px; width:100%; display:flex; flex-direction:column; gap:clamp(6px, calc(var(--sh) * 2), 10px);
+      }
+      .btn {
+        appearance: none; border: none; border-radius: 14px; padding: clamp(8px,calc(var(--sh) * 1.8),15px) 26px;
+        font-size: clamp(15px,calc(var(--sh) * 2.6),20px); font-weight: 700; color: #0b1220; cursor: pointer;
+        background: linear-gradient(180deg, #ffe27a, #ffd23f); letter-spacing: 1px; flex: none;
+      }
+      .btn:active { transform: scale(0.97); }
+      .roster { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+      .char-card {
+        position:relative; overflow:hidden; min-width:0; height:clamp(60px,calc(var(--sh) * 16),142px);
+        background:rgba(255,255,255,.06); border:2px solid rgba(255,255,255,.17);
+        border-radius:12px; cursor:pointer; transition:transform .14s,border-color .14s,box-shadow .14s;
+      }
+      .char-card.selected { border-color:var(--c-lemon); box-shadow:0 0 0 2px rgba(255,211,78,.25),0 8px 20px rgba(0,0,0,.26); }
+      .portrait { position:absolute; inset:0; background-image:linear-gradient(0deg,rgba(8,20,36,.95) 0%,rgba(8,20,36,.18) 48%,transparent 78%),var(--portrait); background-size:cover; background-position:center 28%; }
+      .portrait::after { content:""; position:absolute; inset:0; background:linear-gradient(135deg,var(--accent),transparent 45%); mix-blend-mode:soft-light; opacity:.45; }
+      .char-copy { position:absolute; bottom:0; left:0; right:0; padding:5px 7px; text-align:left; }
+      .char-card .name { font-weight:900; font-size:clamp(10px,calc(var(--sh) * 1.7),13px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .char-card .skill { font-size:clamp(8px,calc(var(--sh) * 1.35),10px); color:#cfecf4; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      /* 选中角色的技能详情：卡片塞不下完整描述，单独一条 */
+      #skill-detail {
+        display:flex; align-items:baseline; justify-content:center; gap:10px; flex-wrap:nowrap;
+        padding:6px 10px; border-radius:10px; background:rgba(255,255,255,.06);
+        border:1px solid rgba(255,255,255,.12); min-height:26px; overflow:hidden;
+      }
+      .sd-name { font-weight:900; font-size:clamp(11px,calc(var(--sh) * 2.1),15px); white-space:nowrap; }
+      .sd-desc { font-size:clamp(10px,calc(var(--sh) * 1.8),13px); color:#dbeaff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .sd-cd { font-size:clamp(9px,calc(var(--sh) * 1.5),11px); color:#8fa9c9; white-space:nowrap; }
+
+      .selected-mark { position:absolute; top:5px; right:5px; width:20px; height:20px; border-radius:50%; display:none; align-items:center; justify-content:center; background:var(--c-lemon); color:#26364a; font-weight:900; font-size:12px; }
+      .char-card.selected .selected-mark { display:flex; }
+
+      /* 结算：标题与按钮固定，名次列表自己滚，按钮永远看得见。 */
+      #result { justify-content: flex-start; gap: 10px; }
+      #result-records {
+        display:none; color:#3a2a06; background:linear-gradient(180deg,#ffe27a,#ffd23f);
+        font-size:clamp(10px,calc(var(--sh) * 1.9),13px); font-weight:900;
+        padding:4px 14px; border-radius:999px; white-space:nowrap;
+      }
+      #result-records.show { display:block; }
+      #result-unlock {
+        display:none; color:#06301D; background:linear-gradient(180deg,#9CF5C4,#3FD08B);
+        font-size:clamp(10px,calc(var(--sh) * 1.9),13px); font-weight:900;
+        padding:4px 14px; border-radius:999px; white-space:nowrap;
+      }
+      #result-unlock.show { display:block; }
+      .result-actions { display:flex; gap:10px; align-items:center; }
+      .btn.secondary { background:linear-gradient(180deg,#8FD3C4,#4ECEB6); }
+      /* 锁定角色 */
+      /* 锁定卡：只把立绘压暗；滤镜挂在整张卡上会连解锁条件文字一起压暗。 */
+      .char-card.locked { cursor:not-allowed; }
+      .char-card.locked .portrait { filter:grayscale(.85) brightness(.55); }
+      /* 底下那行名字/技能在锁定卡上隐藏，名字改由遮罩自己排版，
+         以前半透明遮罩下两层文字叠在一起谁也看不清。 */
+      .char-card.locked .char-copy { visibility:hidden; }
+      .char-card .lock {
+        position:absolute; inset:0; display:flex; flex-direction:column;
+        align-items:center; justify-content:center; gap:2px; padding:0 4px;
+        background:rgba(8,20,36,.8);
+        color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.7); text-align:center; line-height:1.25;
+      }
+      .char-card .lock-name { font-size:clamp(9px,calc(var(--sh) * 1.7),12px); font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+      .char-card .lock-desc { font-size:9px; color:#dbeaff; }
+      .char-card .lock-progress { font-size:9px; color:var(--c-lemon); font-weight:800; }
+
+      /*
+       * 战绩图浮层。它在 #stage 外面、不跟舞台旋转，所以安全区直接用 env()，
+       * 尺寸用 vw/vh（此处 vw/vh 就是真实视口）。
+       * 横屏视口：图和右侧的说明/按钮并排，否则关闭按钮会被挤出屏幕；
+       * 竖屏视口（强制横屏的 iOS 微信就是这种）：上下排，图是竖版的，转回竖屏正好看。
+       */
+      #share-overlay {
+        position:fixed; inset:0; z-index:80; display:none;
+        flex-direction:row; align-items:center; justify-content:center; gap:22px;
+        background:rgba(4,10,20,.94);
+        padding:max(14px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+                max(14px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+      }
+      #share-overlay.show { display:flex; }
+      #share-overlay .side {
+        display:flex; flex-direction:column; align-items:center; gap:12px; max-width:36vw;
+      }
+      #share-img {
+        max-width:min(46vw, 52vh); max-height:92vh; border-radius:14px;
+        box-shadow:0 12px 40px rgba(0,0,0,.5);
+        /* body 上写了 user-select:none / -webkit-touch-callout:none，
+           那会直接让微信里的"长按保存"菜单失效，这里必须单独覆盖回来。 */
+        -webkit-touch-callout: default; -webkit-user-select: auto; user-select: auto;
+        pointer-events: auto;
+      }
+      .share-tip { color:#cfe3f5; font-size:13px; text-align:center; line-height:1.6; }
+      @media (orientation: portrait) {
+        #share-overlay { flex-direction:column; gap:14px; }
+        #share-img { max-width:84vw; max-height:70vh; }
+        #share-overlay .side { flex-direction:row; max-width:90vw; gap:16px; }
+      }
+
+      /* 名次列表只许竖向滚；position:relative 让行的 offsetTop 以列表为准，
+         screens.ts 据此把玩家那一行滚进视野。 */
+      #result-list {
+        flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; gap: 2px;
+        position: relative;
+      }
+      /*
+       * 深色界面配细滚动条（系统默认是白底粗条）。
+       * Chrome 121+ 只要写了 scrollbar-width/scrollbar-color 就会忽略 ::-webkit-scrollbar，
+       * 所以标准属性只给不认 ::-webkit-scrollbar 的内核（Firefox）；
+       * Chrome / Safari / 微信 X5 走 ::-webkit-scrollbar，能做成圆角细条并避开面板圆角。
+       */
+      #result-list::-webkit-scrollbar { width:6px; height:6px; }
+      #result-list::-webkit-scrollbar-track { background:transparent; margin:12px 0; }
+      #result-list::-webkit-scrollbar-thumb { background:rgba(185,238,247,.28); border-radius:999px; }
+      #result-list::-webkit-scrollbar-thumb:active { background:rgba(185,238,247,.45); }
+      @supports not selector(::-webkit-scrollbar) {
+        #result-list { scrollbar-width:thin; scrollbar-color:rgba(185,238,247,.3) transparent; }
+      }
+      /* 行内放不下就省略号收尾：名字不缩（最多占一半），备注缩；分数在备注最前面，被省略的只是尾巴。 */
+      .result-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:5px 4px; border-radius:8px; min-width:0; }
+      .result-row.me { background:rgba(255,211,78,.16); }
+      .result-row .who {
+        font-weight:800; font-size:clamp(12px,calc(var(--sh) * 2.1),16px); white-space:nowrap;
+        flex:0 0 auto; max-width:50%; overflow:hidden; text-overflow:ellipsis;
+      }
+      .result-row .note {
+        font-size:clamp(10px,calc(var(--sh) * 1.7),13px); color:#9fb8dd; white-space:nowrap;
+        flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis;
+      }
+
+      #hud { position:absolute; inset:0; z-index:20; pointer-events:none; }
+      #look-zone { position:absolute; inset:0; pointer-events:auto; touch-action:none; }
+      #topbar {
+        position:absolute; top:0; left:0; right:0; display:flex; align-items:flex-start; gap:8px;
+        padding:calc(var(--sa-top) + 8px) calc(var(--sa-right) + 10px) 0 calc(var(--sa-left) + 10px);
+      }
+      .hud-box {
+        background:linear-gradient(145deg,rgba(20,52,82,.9),rgba(8,24,42,.78)); border:1px solid rgba(255,255,255,.2);
+        box-shadow:0 5px 16px rgba(3,12,24,.22); border-radius:11px; padding:6px 9px; display:flex; flex-direction:column; gap:3px;
+      }
+      .hud-label { font-size:9px; line-height:1; color:#bdd4ed; letter-spacing:.5px; }
+      .hud-value { font-size:16px; line-height:1.05; font-weight:900; color:var(--c-text); font-variant-numeric:tabular-nums; }
+      #crowd-box { width:150px; }
+      #crowd-head { display:flex; justify-content:space-between; align-items:baseline; }
+      #crowd-pct { font-size:11px; font-weight:900; color:var(--c-text); font-variant-numeric:tabular-nums; }
+      #crowd-bar { width:100%; height:7px; background:rgba(255,255,255,.13); border-radius:8px; overflow:hidden; }
+      #crowd-fill { height:100%; width:0%; border-radius:8px; background:linear-gradient(90deg,#4ECEB6,#FFD23F,#FF7A6B); transition:width .2s; }
+      #crowd-box.high { border-color:rgba(255,95,109,.85); animation:pulse .9s infinite; }
+      @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,95,109,.5)} 50%{box-shadow:0 0 0 5px rgba(255,95,109,0)} }
+      #phase-chip {
+        background:rgba(8,24,42,.72); border:1px solid rgba(255,255,255,.18); border-radius:999px;
+        padding:5px 12px; font-size:11px; font-weight:800; color:#dff1ff; letter-spacing:1px; align-self:center;
+      }
+      .spacer { flex: 1 1 auto; }
+      #btn-pause {
+        pointer-events:auto; width:34px; height:34px; border-radius:11px; border:1px solid rgba(255,255,255,.2);
+        background:linear-gradient(145deg,rgba(20,52,82,.9),rgba(8,24,42,.78)); color:#fff; font-size:14px;
+        display:flex; align-items:center; justify-content:center; cursor:pointer;
+      }
+      #status-chip {
+        position:absolute; left:50%; transform:translateX(-50%); top:calc(var(--sa-top) + 52px);
+        background:rgba(255,211,78,.92); color:#3a2a06; font-size:11px; font-weight:900; letter-spacing:1px;
+        padding:4px 12px; border-radius:999px; opacity:0; transition:opacity .18s; white-space:nowrap;
+      }
+      #status-chip.show { opacity: 1; }
+      /*
+       * 底部居中的提示分三档，行高写死，保证互不压盖：
+       *   档 0（+8 ~ +30）   #grab-state 抓扶手状态
+       *   档 1（+36 ~ +58）  #seat-guide 找座导航 / #sit-bar 坐姿稳定度（两者互斥）
+       *   档 2（+66 起）     #tut-bubble 首局教学
+       * 以前 #grab-state 与 #seat-guide 各自定位、重叠约 7px，"没坐下又抓着扶手"时必然压字。
+       */
+      /* 抓住扶手的常驻状态：不消失，玩家随时知道自己抓着几号杆。 */
+      #grab-state {
+        position:absolute; left:50%; transform:translateX(-50%); bottom:calc(var(--sa-bottom) + 8px);
+        background:rgba(255,211,78,.94); color:#3a2a06; font-size:11px; line-height:14px; font-weight:900; letter-spacing:.5px;
+        padding:4px 12px; border-radius:999px; opacity:0; transition:opacity .15s; white-space:nowrap;
+      }
+      #grab-state.show { opacity: 1; }
+      /*
+       * 座位导航条。和 #sit-bar 共用底部同一档高度 —— 两者互斥
+       * （坐着才有稳定度条，没坐着才需要找座），不会打架。
+       */
+      #seat-guide {
+        position:absolute; left:50%; transform:translateX(-50%); bottom:calc(var(--sa-bottom) + 36px);
+        background:rgba(8,28,44,.86); border:1px solid rgba(107,229,154,.55); color:#CFF6E0;
+        font-size:11px; line-height:14px; font-weight:800; letter-spacing:.5px;
+        padding:3px 11px; border-radius:999px; opacity:0; transition:opacity .15s; white-space:nowrap;
+      }
+      #seat-guide.show { opacity: 1; }
+      #seat-guide.ready { background:rgba(255,211,63,.95); border-color:#fff3bd; color:#3a2a06; }
+      #seat-guide.full  { background:rgba(232,114,138,.9); border-color:#ffd0d8; color:#3a0b14; }
+      /*
+       * 找座箭头：目标空座在画面外时贴着屏幕边缘指过去（在画面里时绿光柱自己就看得见）。
+       * 位置由 session 按舞台百分比写入 left/top，旋转写进 --rot；强制横屏旋转舞台后照样对。
+       */
+      #seat-arrow {
+        position:absolute; width:calc(38 * var(--u, 1px)); height:calc(38 * var(--u, 1px));
+        transform:translate(-50%,-50%) rotate(var(--rot, 0rad)); pointer-events:none;
+        opacity:0; transition:opacity .2s;
+        border-radius:50%; background:rgba(8,28,44,.72); border:2px solid rgba(107,229,154,.9);
+        box-shadow:0 0 12px rgba(107,229,154,.55);
+      }
+      #seat-arrow::after {
+        content:""; position:absolute; left:58%; top:50%; transform:translate(-50%,-50%);
+        border-style:solid; border-color:transparent transparent transparent #6BE59A;
+        border-width:calc(8 * var(--u, 1px)) 0 calc(8 * var(--u, 1px)) calc(13 * var(--u, 1px));
+      }
+      #seat-arrow.show { opacity:1; animation:seatArrowPulse .9s ease-in-out infinite; }
+      @keyframes seatArrowPulse { 0%,100% { box-shadow:0 0 6px rgba(107,229,154,.4); } 50% { box-shadow:0 0 16px rgba(107,229,154,.85); } }
+      #seat-guide.locked { background:rgba(8,28,44,.86); border-color:rgba(255,255,255,.35); color:#dbe7f3; }
+      /* 技能/操作飘字 */
+      #skill-toast {
+        position:absolute; left:50%; top:38%; transform:translateX(-50%);
+        font-size:clamp(15px,calc(var(--sh) * 3.4),26px); font-weight:900; letter-spacing:2px;
+        color:#fff; text-shadow:0 2px 0 rgba(6,18,34,.55), 0 0 16px rgba(90,220,255,.7);
+        opacity:0; transition:opacity .12s, transform .25s; white-space:nowrap; pointer-events:none;
+      }
+      #skill-toast.show { opacity:1; transform:translateX(-50%) translateY(-8px); }
+      #skill-toast.fail { color:#ffb4bd; text-shadow:0 2px 0 rgba(40,6,14,.6); }
+
+      /* 顶部留给 #status-chip（+52 ~ +74），矮屏上 19% 会压到它。 */
+      #event-banner {
+        position:absolute; top:max(19%, calc(var(--sa-top) + 84px)); left:50%; transform:translateX(-50%);
+        background:rgba(255,95,109,.94); box-shadow:0 5px 18px rgba(62,13,26,.3); color:#fff;
+        font-size:clamp(14px,calc(var(--sh) * 2.7),21px); font-weight:900;
+        padding:7px 16px; border-radius:999px; opacity:0; transition:opacity .15s;
+        letter-spacing:1px; white-space:nowrap;
+      }
+      #event-banner.show { opacity: 1; }
+
+      #joystick-zone {
+        position:absolute; left:0; bottom:0; width:46%; height:56%; pointer-events:auto; touch-action:none;
+      }
+      #joystick-base {
+        position:absolute;
+        left:max(calc(72 * var(--u)), calc(var(--sa-left) + 68 * var(--u)));
+        bottom:max(calc(26 * var(--u)), calc(var(--sa-bottom) + 20 * var(--u)));
+        width:clamp(calc(96 * var(--u)),calc(var(--sh) * 26),calc(132 * var(--u)));
+        height:clamp(calc(96 * var(--u)),calc(var(--sh) * 26),calc(132 * var(--u)));
+        border-radius:50%; background:radial-gradient(circle at 35% 28%,rgba(255,255,255,.22),rgba(10,31,49,.32));
+        border:2px solid rgba(255,255,255,.28);
+        box-shadow:inset 0 0 0 calc(6 * var(--u)) rgba(255,255,255,.05),0 calc(6 * var(--u)) calc(14 * var(--u)) rgba(1,11,22,.24);
+        pointer-events:none; opacity:.55; transition:opacity .12s;
+      }
+      #joystick-base.active { opacity: 1; }
+      #joystick-knob {
+        position:absolute; left:50%; top:50%; width:44%; height:44%;
+        transform:translate(-50%,-50%); border-radius:50%;
+        background:linear-gradient(145deg,#fff,#9ec9e6); box-shadow:0 3px 10px rgba(0,0,0,.32);
+      }
+      #action-zone { position:absolute; right:0; bottom:0; width:48%; height:58%; pointer-events:none; }
+      .act-btn {
+        position:absolute; border-radius:50%; width:var(--sz,68px); height:var(--sz,68px);
+        display:flex; align-items:center; justify-content:center;
+        background:linear-gradient(145deg,rgba(75,150,190,.95),rgba(22,72,108,.95)); border:2px solid rgba(255,255,255,.55);
+        box-shadow:0 calc(5 * var(--u)) 0 rgba(4,25,40,.38),0 calc(7 * var(--u)) calc(14 * var(--u)) rgba(2,17,28,.25);
+        color:#fff; font-size:calc(12 * var(--u)); font-weight:900; letter-spacing:.4px;
+        pointer-events:auto; flex-direction:column; line-height:1.05; touch-action:none;
+        transition:transform .07s, filter .12s;
+      }
+      .act-btn::first-line { font-size:calc(18 * var(--u)); }
+      #skill-name, #interact-name { font-size:calc(9 * var(--u)); letter-spacing:0; }
+      /* 首局引导。刻意不做全屏遮罩：摇杆是左半屏动态起按，
+         任何盖在上面的遮罩都会吃掉 pointerdown，玩家会"照着教程做却动不了"。 */
+      #tut-bubble {
+        position:absolute; left:50%; transform:translateX(-50%);
+        bottom:calc(var(--sa-bottom) + 66px); max-width:78%;
+        background:rgba(8,24,42,.92); border:1px solid rgba(255,211,78,.5);
+        color:#fff; font-size:clamp(11px,calc(var(--sh) * 2.2),15px); line-height:1.3; font-weight:700;
+        padding:7px 14px; border-radius:999px; white-space:nowrap;
+        opacity:0; transition:opacity .2s; pointer-events:none;
+      }
+      #tut-bubble.show { opacity:1; }
+      #tut-skip {
+        position:absolute; right:calc(var(--sa-right) + 10px); top:calc(var(--sa-top) + 52px);
+        pointer-events:auto; cursor:pointer;
+        background:rgba(8,24,42,.7); border:1px solid rgba(255,255,255,.2);
+        color:#bdd4ed; font-size:10px; padding:4px 10px; border-radius:999px;
+      }
+      .tut-pulse { animation:tutPulse 1s ease-in-out infinite; }
+      @keyframes tutPulse {
+        0%,100% { box-shadow:0 0 0 0 rgba(255,211,78,.7); }
+        50% { box-shadow:0 0 0 10px rgba(255,211,78,0); }
+      }
+      #score-box .hud-value { color:#FFD23F; }
+      /* 坐姿稳定度：被推会掉，掉光就被拽起来 */
+      #sit-bar { position:absolute; left:50%; transform:translateX(-50%); bottom:calc(var(--sa-bottom) + 45px);
+        width:110px; height:5px; border-radius:6px; background:rgba(255,255,255,.18); overflow:hidden;
+        opacity:0; transition:opacity .15s; }
+      #sit-bar.show { opacity:1; }
+      #sit-fill { height:100%; width:100%; background:linear-gradient(90deg,#FF7A6B,#FFD23F,#4ECEB6); }
+      .act-btn.primary { background:linear-gradient(145deg,#ff8b83,#ef405c); border-color:#ffd1d4; }
+      .act-btn#btn-skill { background:linear-gradient(145deg,#54ddc5,#159985); border-color:#b7fff1; }
+      .act-btn.active { transform:scale(.9); filter:brightness(1.35); }
+      /* 冷却：整体压暗 + 角标读秒，不再拿遮罩盖住按钮上的字。 */
+      .act-btn.cooling { filter:grayscale(.75) brightness(.62); }
+      .act-btn .cd {
+        position:absolute; top:calc(-3 * var(--u)); right:calc(-3 * var(--u));
+        min-width:calc(19 * var(--u)); height:calc(19 * var(--u)); padding:0 calc(4 * var(--u)); border-radius:999px;
+        display:none; align-items:center; justify-content:center;
+        background:#0b1220; color:#ffd23f; font-size:calc(11 * var(--u)); font-weight:900; border:1px solid rgba(255,211,78,.5);
+        font-variant-numeric:tabular-nums;
+      }
+      .act-btn.cooling .cd { display:flex; }
+      /* 硬直（被推中、刚坐下/起身）：按键只缓冲 0.15 秒，按钮要看得出"现在按不动"。 */
+      #hud.stunned .act-btn { filter:grayscale(.45) brightness(.72); }
+      /* 尺寸和偏移都乘 --u（手机上 =1px，数值与旧写法逐像素一致）；--spread 只在放大时非 0。 */
+      #btn-push {
+        right:max(calc(18 * var(--u)), calc(var(--sa-right) + 14 * var(--u)));
+        bottom:max(calc(22 * var(--u)), calc(var(--sa-bottom) + 18 * var(--u)));
+        --sz:clamp(calc(62 * var(--u)),calc(var(--sh) * 19),calc(84 * var(--u)));
+      }
+      #btn-dash {
+        right:calc(max(calc(104 * var(--u)), calc(var(--sa-right) + 100 * var(--u))) + var(--spread));
+        bottom:max(calc(32 * var(--u)), calc(var(--sa-bottom) + 28 * var(--u)));
+        --sz:clamp(calc(48 * var(--u)),calc(var(--sh) * 14),calc(62 * var(--u)));
+      }
+      #btn-skill {
+        right:max(calc(39 * var(--u)), calc(var(--sa-right) + 35 * var(--u)));
+        bottom:calc(max(calc(100 * var(--u)), calc(var(--sa-bottom) + 96 * var(--u))) + var(--spread));
+        --sz:clamp(calc(48 * var(--u)),calc(var(--sh) * 14),calc(62 * var(--u)));
+      }
+      #btn-grab {
+        right:calc(max(calc(110 * var(--u)), calc(var(--sa-right) + 106 * var(--u))) + var(--spread));
+        bottom:calc(max(calc(102 * var(--u)), calc(var(--sa-bottom) + 98 * var(--u))) + var(--spread));
+        --sz:clamp(calc(42 * var(--u)),calc(var(--sh) * 12),calc(54 * var(--u))); font-size:calc(10 * var(--u));
+      }
+      #btn-grab.on { background:linear-gradient(145deg,#ffe886,#ffbe37); color:#0b1220; border-color:#fff3bd; }
+      /*
+       * 可以坐下时按钮必须自己会喊。
+       * 原来只有 "抓住"→"坐下" 两个字的变化，在 42px 的按钮上等于没有变化，
+       * 玩家整局都不知道这个键还能占座。
+       */
+      #btn-grab.sit {
+        background:linear-gradient(145deg,#9CF5C4,#3FD08B); color:#06301D; border-color:#DBFFEC;
+        animation:seatReady .7s ease-in-out infinite;
+      }
+      @keyframes seatReady {
+        0%,100% { box-shadow:0 0 0 0 rgba(107,229,154,.65); }
+        50%     { box-shadow:0 0 0 9px rgba(107,229,154,0); }
+      }
+
+      /* 暂停 */
+      #pause-mask {
+        position:absolute; inset:0; z-index:40; display:none; align-items:center; justify-content:center; flex-direction:column; gap:14px;
+        background:rgba(6,16,30,.78); color:#fff;
+      }
+      #pause-mask.show { display:flex; }
+
+      /* 加载 */
+      #loading {
+        position:absolute; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:14px;
+        background:linear-gradient(145deg,#10334e,#0c1930); color:#dff1ff; font-size:14px; letter-spacing:2px;
+      }
+      #loading.hidden { display: none; }
+      #loading .bar { width:min(220px,50vw); height:6px; border-radius:6px; background:rgba(255,255,255,.14); overflow:hidden; }
+      #loading .bar i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#22c1a6,#ffd23f); transition:width .25s; }
+
+      /* 音效开关。大厅：右上角图标（标题居中、选角面板在标题下方，角落是空的）；
+         暂停页：一颗带文字的按钮，和"继续/退出"区分开，看得出是设置而不是动作。 */
+      .sound-corner {
+        position:absolute; top:calc(var(--sa-top) + 10px); right:calc(var(--sa-right) + 12px); z-index:1;
+        width:34px; height:34px; padding:0; border-radius:11px; border:1px solid rgba(255,255,255,.2);
+        background:linear-gradient(145deg,rgba(20,52,82,.9),rgba(8,24,42,.78)); color:#fff;
+        font-size:16px; line-height:1; display:flex; align-items:center; justify-content:center; cursor:pointer;
+      }
+      .sound-corner[aria-pressed="false"] { opacity:.7; }
+      .btn.toggle { background:rgba(255,255,255,.1); color:#dff1ff; border:1px solid rgba(255,255,255,.28); }
+
+      .dim { color: #9fb8dd; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="safe-area-probe"></div>
+
+    <div id="stage">
+      <div id="app"></div>
+
+      <!-- 大厅 -->
+      <div id="lobby" class="screen">
+        <button id="btn-sound-lobby" class="sound-corner" data-sound-toggle="icon" aria-pressed="true">🔊</button>
+        <div>
+          <h1>好挤的<span class="accent">大巴</span></h1>
+          <p class="sub">抢位置 · 抓扶手 · 把对手挤下车</p>
+        </div>
+        <div class="panel">
+          <div id="roster" class="roster"></div>
+          <div id="skill-detail"></div>
+        </div>
+        <!--
+          环顾是个藏起来的手势，不说就等于没有。
+          放在大厅而不是塞进对局教学：60 秒的局里已经有 6 条气泡了，
+          再加一条会把"门开了会淘汰"这种真正致命的信息挤没。
+        -->
+        <p class="hint">左手摇杆走位 · 右手动作 · 空白处左右滑动可环顾四周</p>
+        <button id="btn-start" class="btn">开始上车</button>
+      </div>
+
+      <!-- 结算 -->
+      <div id="result" class="screen hidden">
+        <h1>🏆 <span class="accent">结算</span></h1>
+        <div id="result-records"></div>
+        <div id="result-unlock"></div>
+        <div class="panel" id="result-list"></div>
+        <div class="result-actions">
+          <button id="btn-share" class="btn secondary">生成战绩图</button>
+          <button id="btn-lobby" class="btn secondary">换角色</button>
+          <button id="btn-again" class="btn">再挤一局</button>
+        </div>
+      </div>
+
+      <!-- 对局 HUD -->
+      <div id="hud" class="hidden">
+        <!--
+          环顾层：必须是 #hud 的第一个子元素。
+          命中测试取的是该点最上层的元素，同层级下后来的兄弟在上 ——
+          于是摇杆区、动作按钮、暂停键天然优先，落在它们之外的拖动才会到这里。
+          不需要任何手动的区域排除。
+        -->
+        <div id="look-zone"></div>
+        <div id="topbar">
+          <div class="hud-box" id="crowd-box">
+            <div id="crowd-head">
+              <span class="hud-label">拥挤度</span>
+              <span id="crowd-pct">45%</span>
+            </div>
+            <div id="crowd-bar"><div id="crowd-fill"></div></div>
+          </div>
+          <div id="phase-chip">上车中</div>
+          <div class="spacer"></div>
+          <div class="hud-box" id="score-box">
+            <span class="hud-label">得分</span>
+            <span class="hud-value" id="hud-score">0</span>
+          </div>
+          <div class="hud-box">
+            <span class="hud-label">时间</span>
+            <span class="hud-value" id="hud-time">0:00</span>
+          </div>
+          <div class="hud-box">
+            <span class="hud-label">存活</span>
+            <span class="hud-value" id="hud-alive">8</span>
+          </div>
+          <div id="btn-pause">⏸</div>
+        </div>
+        <div id="status-chip"></div>
+        <div id="grab-state"></div>
+        <div id="sit-bar"><div id="sit-fill"></div></div>
+        <div id="seat-guide"></div>
+        <div id="seat-arrow"></div>
+        <div id="tut-bubble"></div>
+        <div id="tut-skip" class="hidden">跳过教学</div>
+        <div id="skill-toast"></div>
+        <div id="event-banner"></div>
+        <div id="joystick-zone">
+          <div id="joystick-base"><div id="joystick-knob"></div></div>
+        </div>
+        <div id="action-zone">
+          <div class="act-btn" id="btn-grab">✋<br><span id="interact-name">抓住</span></div>
+          <div class="act-btn" id="btn-dash">⚡<br>冲刺</div>
+          <div class="act-btn primary" id="btn-push">💥<br>推挤</div>
+          <div class="act-btn" id="btn-skill">★<br><span id="skill-name">技能</span></div>
+        </div>
+      </div>
+
+      <div id="loading">
+        <div>好挤的大巴</div>
+        <div class="bar"><i id="loading-bar"></i></div>
+        <div class="dim" style="font-size:11px">正在把乘客塞上车…</div>
+      </div>
+
+      <div id="pause-mask">
+        <h1>已暂停</h1>
+        <button id="btn-resume" class="btn">继续</button>
+        <button id="btn-sound-pause" class="btn toggle" data-sound-toggle="label" aria-pressed="true">🔊 音效：开</button>
+        <button id="btn-quit" class="btn" style="background:linear-gradient(180deg,#8fa6c4,#6b83a3)">退出本局</button>
+      </div>
+    </div>
+    <!-- /#stage -->
+
+    <!-- 战绩图浮层。刻意放在 #stage 外面：强制横屏时 stage 被 rotate(90deg)，
+         而 transform 祖先会让 position:fixed 跟着一起转 —— 放在里面看到的是转了 90° 的图；
+         放外面不跟舞台旋转，正好是竖屏观感（玩家本来就要把手机转回竖屏去发微信）。 -->
+    <div id="share-overlay">
+      <img id="share-img" alt="战绩图" />
+      <div class="side">
+        <div class="share-tip">长按图片保存<br>发送给朋友</div>
+        <button id="share-close" class="btn">关闭</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

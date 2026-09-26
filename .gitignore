@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+.DS_Store
+# Blender 自动备份（建模脚本已关闭，手动打开 .blend 保存时仍可能产生）
+*.blend1
+# Claude Code 本机设置
+.claude/settings.local.json
