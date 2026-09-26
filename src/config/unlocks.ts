@@ -21,9 +21,12 @@ export const STARTERS = ['xiaoli', 'xiaoxia', 'aqiang'];
 
 export const UNLOCKS: UnlockRule[] = [
   {
-    id: 'lanjie', desc: '累计挤下 5 人',
-    test: (p) => p.totals.knockouts >= 5,
-    progress: (p) => `${Math.min(5, p.totals.knockouts)}/5 人`
+    // 以前是"累计挤下 5 人"：抢座类打法一局挤下 0 人，几乎永远解不了。
+    // "推中"对所有打法都可达（拽座、守门、乱推都在推人），又体现"挤"。
+    // 老存档里已经按旧条件解锁的保留（knockouts ≥ 5 仍算）。
+    id: 'lanjie', desc: '累计推中别人 20 次',
+    test: (p) => (p.totals.pushHits ?? 0) >= 20 || p.totals.knockouts >= 5,
+    progress: (p) => `${Math.min(20, p.totals.pushHits ?? 0)}/20 次`
   },
   {
     id: 'ayuan', desc: '单局撑到终点 1 次',

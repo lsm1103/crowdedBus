@@ -41,7 +41,15 @@ interface Luggage {
   slow: boolean;
   /** 滑行阻尼（1/秒）。 */
   drag: number;
+  /** 谁放的（阿远/兰姐）；随机事件刷出来的为 null。行李箱撞人时记击落归属用。 */
+  owner: number | null;
 }
+
+/**
+ * 行李把人顶开的速度上限（格/帧）。行李刷在人身上、或滑动的箱子追上人时，
+ * 人按这个速度被平滑挤开，而不是被碰撞框一帧弹出半个身位（沿用"单帧位移 ≤0.12"）。
+ */
+const BAG_PUSH_STEP = 0.1;
 
 /** 行李的碰撞框半宽（x）/半深（z）。所有行李统一，由位置现算，免得出现框和位置脱节。 */
 const LUG_HX = 0.6;
@@ -225,6 +233,7 @@ export class Simulation {
       crowd: this.crowd,
       seatFree: (id: number) => this.seatFree(id),
       railFree: (id: number) => !this.railOwner.has(id),
+      canUseSkill: (id: number) => this.canUseSkill(id),
       hotZone: this.hotZone,
       nav: this.nav
     };
@@ -278,6 +287,7 @@ export class Simulation {
     this.seatMoves.clear();
     this.settleUntil.clear();
     this.nav.reset();
+    this.nav.beginStep();
     this.layout.doors[0].open = false; // 前门
     this.layout.doors[1].open = true; // 后门（上车）
 
@@ -313,6 +323,7 @@ export class Simulation {
         score: 0,
         scoreParts: { seat: 0, zone: 0, knockout: 0, survive: 0, push: 0 },
         knockouts: 0,
+        pushHits: 0,
         seatSeconds: 0,
         lastHitBy: null,
         lastHitAt: -999
@@ -416,6 +427,9 @@ export class Simulation {
         this.finalizeScores();
       }
     }
+
+    // 下一步（玩家输入 + bot 决策）的寻路重算预算。
+    this.nav.beginStep();
 
     const out = this.eventsOut;
     this.eventsOut = [];
@@ -1031,7 +1045,13 @@ export class Simulation {
    * 以前随机点位会直接刷在立杆、座垫前沿、甚至正在起身的人身上：
    * 人被行李框一帧弹开，最远弹进座垫里 —— 这是"起身瞬移"的真正来源。
    */
-  private luggageFits(pos: Vec2, ignore: CharacterState | null = null, self: Luggage | null = null): boolean {
+  /**
+   * @param standingOk 站着的人不算阻挡（放行李箱、滑动中的箱子：碰撞会把站着的人平滑顶开）。
+   *   坐着/正在起坐的人永远算阻挡 —— 他们被钉在座位上、推不开。
+   */
+  private luggageFits(
+    pos: Vec2, ignore: CharacterState | null = null, self: Luggage | null = null, standingOk = self !== null
+  ): boolean {
     const rect = lugRect(pos);
     const r = this.layout.interior;
     if (rect.minX < r.minX || rect.maxX > r.maxX || rect.minZ < r.minZ || rect.maxZ > r.maxZ) return false;
@@ -1047,13 +1067,15 @@ export class Simulation {
       // 坐着/正在起坐的人：连他起身后的落脚点（座垫前沿外）也要空出来，
       // 不然起身一落地就被行李框弹开。
       const sitting = c.seatId !== null || this.seatMoves.has(c.id);
-      if (sitting) {
+      // 随机刷行李时还要空出坐着的人起身后的落脚点；放箱子/滑动时不用 ——
+      // 行李顶人已限速（BAG_PUSH_STEP），起身落地压到行李也会原地等（underLuggage）。
+      if (sitting && !standingOk) {
         const sid = c.seatId ?? this.seatMoves.get(c.id)!.seatId;
         const seat = this.seatById(sid);
         if (seat && distToRect(seatFrontPoint(seat, c.radius), rect) < c.radius + 0.05) return false;
       }
-      // 移动中的行李可以顶着站着的人走（碰撞会把人推开），但不能压到坐着/正在起坐的人。
-      if (self && !sitting) continue;
+      // 站着的人可以被行李顶开（见 BAG_PUSH_STEP），坐着/正在起坐的人不行。
+      if (standingOk && !sitting) continue;
       if (distToRect(c.pos, rect) < c.radius + 0.05) return false;
     }
     return true;
@@ -1070,9 +1092,34 @@ export class Simulation {
           r.minZ + 2 + this.rnd() * (r.maxZ - r.minZ - 4)
         );
         if (!this.luggageFits(pos)) continue;
-        this.luggage.push({ pos, vel: V2(), rect: lugRect(pos), remaining: 3, slow: false, drag: 4 });
+        this.luggage.push({ pos, vel: V2(), rect: lugRect(pos), remaining: 3, slow: false, drag: 4, owner: null });
         break;
       }
+    }
+  }
+
+  /**
+   * 滑动的行李箱撞上站着的人：把一部分速度传给他（被撞开），箱子自己减速。
+   * 人是被速度推走的，不是被碰撞框弹开的 —— 不会瞬移，还能被一路顶向车门。
+   * 撞人记在放箱子的人头上，被撞下车算他的击落。
+   */
+  private suitcaseKnock(l: Luggage) {
+    const speed = v2Len(l.vel);
+    if (speed < 0.5) return;
+    const dir = v2Scale(l.vel, 1 / speed);
+    for (const c of this.characters) {
+      if (!c.alive || c.seatId !== null || this.seatMoves.has(c.id) || c.id === l.owner) continue;
+      if (distToRect(c.pos, l.rect) >= c.radius) continue;
+      // 已经在往外走、而且比箱子快的就不用再推。
+      if (c.vel.x * dir.x + c.vel.z * dir.z >= speed * 0.9) continue;
+      c.vel = v2Add(c.vel, v2Scale(dir, speed * 0.8));
+      c.stunTimer = Math.max(c.stunTimer, BALANCE.stunDuration * 0.5);
+      if (l.owner !== null) {
+        c.lastHitBy = l.owner;
+        c.lastHitAt = this.time;
+      }
+      this.eventsOut.push({ type: 'hit', charId: c.id });
+      l.vel = v2Scale(l.vel, 0.7);
     }
   }
 
@@ -1083,8 +1130,12 @@ export class Simulation {
         // 滑动的行李撞上墙、座垫、立杆、障碍物或坐着的人就停住：
         // 穿过去的话会把人夹在行李和座垫之间，求解器只能二选一。
         const next = v2Add(l.pos, v2Scale(l.vel, dt));
-        if (l.slow || this.luggageFits(next, null, l)) l.pos = next;
-        else l.vel = V2();
+        if (l.slow || this.luggageFits(next, null, l)) {
+          l.pos = next;
+          if (!l.slow) this.suitcaseKnock(l);
+        } else {
+          l.vel = V2();
+        }
       }
       l.vel = v2Scale(l.vel, Math.max(0, 1 - l.drag * dt));
       l.rect = lugRect(l.pos);
@@ -1208,7 +1259,7 @@ export class Simulation {
     }
     if (c.isPlayer && c.skillCd <= INPUT_BUFFER) return;
     this.consumeButton(c, 'skill');
-    this.eventsOut.push({ type: 'skillFail', charId: c.id });
+    this.eventsOut.push({ type: 'skillFail', charId: c.id, reason: 'cooldown' });
   }
 
   /**
@@ -1258,6 +1309,7 @@ export class Simulation {
         t.lastHitBy = c.id;
         t.lastHitAt = this.time;
         this.eventsOut.push({ type: 'hit', charId: t.id });
+        if (this.phase === 'driving' || this.phase === 'finale') c.pushHits++;
         this.scorePushHit(c, t);
         // 推坐着的人：扣稳定度，三下把他拽起来，座位空出来给人抢。
         if (t.seatId !== null) {
@@ -1391,15 +1443,45 @@ export class Simulation {
     }
   }
 
+  /**
+   * 阿远行李箱的放置点与滑出方向：先试正前方一个箱子的距离，再沿身体两侧各偏 0.3 / 0.6、
+   * 稍微贴近一点，最后斜 25° / 50° 方向（箱子就朝那个方向滑）。都不行返回 null。
+   * 站着的人不阻挡（见 luggageFits 的 standingOk）。
+   */
+  private placeSuitcase(c: CharacterState): { pos: Vec2; dir: Vec2 } | null {
+    const ahead = c.radius + LUG_HX + 0.05;
+    const tries: [number, number, number][] = [
+      [0, ahead, 0], [0, ahead, 0.3], [0, ahead, -0.3], [0, ahead, 0.6], [0, ahead, -0.6], [0, ahead - 0.15, 0],
+      [0.45, ahead, 0], [-0.45, ahead, 0], [0.9, ahead, 0], [-0.9, ahead, 0]
+    ];
+    for (const [turn, fwd, lat] of tries) {
+      const a = c.facing + turn;
+      const f = V2(Math.sin(a), Math.cos(a));
+      const side = V2(f.z, -f.x);
+      const p = V2(c.pos.x + f.x * fwd + side.x * lat, c.pos.z + f.z * fwd + side.z * lat);
+      if (this.luggageFits(p, c, null, true)) return { pos: p, dir: f };
+    }
+    return null;
+  }
+
+  /** 这个角色现在按技能能不能放出来（冷却好了、阿远身前放得下）。供 bot 决策用。 */
+  canUseSkill(id: number): boolean {
+    const c = this.characters[id];
+    if (!c || !c.alive || c.skillCd > 0) return false;
+    return c.defId !== 'ayuan' || this.placeSuitcase(c) !== null;
+  }
+
   private activateSkill(c: CharacterState) {
     const def = characterById(c.defId);
-    // 阿远的行李箱要有地方放：身前被墙/座垫/立杆/人堵住时这次不放，只给 0.5 秒短冷却，
-    // 不然箱子会刷在障碍物里（见 luggageFits 的说明）。
+    // 阿远的行李箱要有地方放。以前身前 0.5 米内站着人就判"放不下"（机器人成功率 10%，
+    // 玩家对着人群几乎按不出来），可行李箱本来就是用来撞人的：现在站着的人不算阻挡，
+    // 只有墙/座垫/靠背/立杆/障碍物/填充体/别的行李/坐着或正在起坐的人才算；
+    // 正前方放不下就往两侧偏一点再试。真放不下：不进冷却，提示"放不下"，换个方向再按。
+    let ayuan: { pos: Vec2; dir: Vec2 } | null = null;
     if (def.id === 'ayuan') {
-      const d0 = v2Norm(V2(Math.sin(c.facing), Math.cos(c.facing)));
-      if (!this.luggageFits(v2Add(c.pos, v2Scale(d0, c.radius + LUG_HX + 0.05)), c)) {
-        c.skillCd = 0.5;
-        this.eventsOut.push({ type: 'skillFail', charId: c.id });
+      ayuan = this.placeSuitcase(c);
+      if (!ayuan) {
+        this.eventsOut.push({ type: 'skillFail', charId: c.id, reason: 'blocked' });
         return;
       }
     }
@@ -1416,7 +1498,7 @@ export class Simulation {
       case 'lanjie': {
         // 软障碍：不参与碰撞，踩上去减速 30%（描述写的就是这个）。
         const pos = v2Add(c.pos, v2Scale(dir, 1.2));
-        this.luggage.push({ pos, vel: V2(), rect: lugRect(pos), remaining: 4, slow: true, drag: 4 });
+        this.luggage.push({ pos, vel: V2(), rect: lugRect(pos), remaining: 4, slow: true, drag: 4, owner: c.id });
         fx.remaining = 0;
         break;
       }
@@ -1424,9 +1506,10 @@ export class Simulation {
         // 以前碰撞框按施法者自己的位置算，施放那一帧把施法者弹开约 1m；
         // 初速 5、阻尼 4 也只滑 1.2 格。现在：框按行李位置算、放在身前不压到自己，
         // 初速 6.6、阻尼 2，1.2 秒内滑行 ≈ 6.6/2·(1-e^-2.4) ≈ 3 格，与描述一致。
-        const pos = v2Add(c.pos, v2Scale(dir, c.radius + LUG_HX + 0.05));
+        const pos = ayuan ? ayuan.pos : v2Add(c.pos, v2Scale(dir, c.radius + LUG_HX + 0.05));
+        const slide = ayuan ? ayuan.dir : dir;
         this.luggage.push({
-          pos, vel: v2Scale(dir, 6.6), rect: lugRect(pos), remaining: 1.2, slow: false, drag: 2
+          pos, vel: v2Scale(slide, 6.6), rect: lugRect(pos), remaining: 1.2, slow: false, drag: 2, owner: c.id
         });
         fx.remaining = 0;
         break;
@@ -1522,8 +1605,20 @@ export class Simulation {
     const standing = this.characters.filter(
       (c) => c.alive && c.seatId === null && !this.seatMoves.has(c.id)
     );
+    // 行李顶人：每人每帧最多被顶开 BAG_PUSH_STEP（行李刷在人身上时平滑挤开，不瞬移）。
+    const bagBudget = new Map<number, number>();
     const resolveStatic = (c: CharacterState) => {
-      for (const b of bags) c.pos = resolveCircleRect(c.pos, c.radius, b);
+      for (const b of bags) {
+        const to = resolveCircleRect(c.pos, c.radius, b);
+        const dx = to.x - c.pos.x;
+        const dz = to.z - c.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 1e-9) continue;
+        const left = bagBudget.get(c.id) ?? BAG_PUSH_STEP;
+        const k = Math.min(1, left / d);
+        bagBudget.set(c.id, left - d * k);
+        c.pos = V2(c.pos.x + dx * k, c.pos.z + dz * k);
+      }
       for (const w of rects) c.pos = resolveCircleRect(c.pos, c.radius, w);
       for (const h of this.layout.handrails) c.pos = resolveCirclePole(c.pos, c.radius, h);
     };

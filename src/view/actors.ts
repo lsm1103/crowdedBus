@@ -777,6 +777,46 @@ export class ActorManager {
     }
   }
 
+  private zones: { x0: number; x1: number; y0: number; y1: number }[] = [];
+  private zonesAge = Infinity;
+
+  /**
+   * 摇杆和动作按钮在屏幕上占的区域（NDC）。名字牌不能压在上面 —— 那是玩家拇指底下。
+   *
+   * 直接量 DOM：按钮尺寸随屏幕高度缩放（平板放大 1.4 倍），摇杆按下时还会跟着手指走，
+   * 写死坐标一定会错。用 offsetLeft/offsetTop 累加到 #stage：这是舞台内的布局坐标，
+   * 强制横屏把舞台 rotate(90°) 之后依然成立（getBoundingClientRect 就不行了）。
+   * 每 0.5 秒量一次，布局变化（旋转、缩放）最多滞后半秒。
+   */
+  private controlZones() {
+    if (this.zonesAge < 30) return this.zones;
+    this.zonesAge = 0;
+    const stage = document.getElementById('stage');
+    const hud = document.getElementById('hud');
+    if (!stage || !hud || hud.classList.contains('hidden')) return (this.zones = []);
+    const W = stage.offsetWidth || 1;
+    const H = stage.offsetHeight || 1;
+    const PAD = 8;
+    this.zones = ['#joystick-base', '#btn-push', '#btn-dash', '#btn-skill', '#btn-grab'].flatMap((sel) => {
+      const el = hud.querySelector(sel) as HTMLElement | null;
+      if (!el || !el.offsetWidth) return [];
+      let x = 0;
+      let y = 0;
+      for (let n: HTMLElement | null = el; n && n !== stage; n = n.offsetParent as HTMLElement | null) {
+        x += n.offsetLeft;
+        y += n.offsetTop;
+      }
+      // 摇杆底座按下时用 transform 平移到手指下，offset 量不到这部分，额外留一圈。
+      const extra = sel === '#joystick-base' ? el.offsetWidth * 0.5 : 0;
+      const l = x - PAD - extra;
+      const r = x + el.offsetWidth + PAD + extra;
+      const t = y - PAD - extra;
+      const b = y + el.offsetHeight + PAD + extra;
+      return [{ x0: (l / W) * 2 - 1, x1: (r / W) * 2 - 1, y0: 1 - (b / H) * 2, y1: 1 - (t / H) * 2 }];
+    });
+    return this.zones;
+  }
+
   /**
    * 名字牌去重。
    *
@@ -785,6 +825,7 @@ export class ActorManager {
    * 人散开之后名字牌会自然回来，所以不会丢信息，只是不在挤成一团时硬塞。
    */
   private declutterLabels(camPos: THREE.Vector3) {
+    this.zonesAge++;
     const cam = this.camera;
     const list: { a: Actor; x: number; y: number; hw: number; hh: number; d: number }[] = [];
     for (const a of this.actors.values()) {
@@ -811,9 +852,20 @@ export class ActorManager {
       // 锚点在屏幕里、牌子越出边缘：把牌子往里收。用 Sprite.center 平移，不动世界坐标。
       // 着色器里是 position - (center - 0.5)，所以要往右挪 ox，center.x 就减 ox / 牌宽。
       const ox = shiftInto(wp.x, hw, -1 + LABEL_EDGE_SIDE, 1 - LABEL_EDGE_SIDE);
-      const oy = shiftInto(wp.y, hh, -1 + LABEL_EDGE_BOTTOM, 1 - LABEL_EDGE_TOP);
+      let oy = shiftInto(wp.y, hh, -1 + LABEL_EDGE_BOTTOM, 1 - LABEL_EDGE_TOP);
+      // 压到摇杆或动作按钮上：往上挪到操作区上沿之外；挪完顶到状态栏就不显示。
+      const cx = wp.x + ox;
+      for (const z of this.controlZones()) {
+        const cy = wp.y + oy;
+        if (cx + hw > z.x0 && cx - hw < z.x1 && cy + hh > z.y0 && cy - hh < z.y1) oy += z.y1 - (cy - hh);
+      }
+      if (wp.y + oy + hh > 1 - LABEL_EDGE_TOP + 1e-3) {
+        a.labelTarget = 0;
+        sp.center.set(0.5, 0.5);
+        continue;
+      }
       sp.center.set(0.5 - ox / (2 * hw), 0.5 - oy / (2 * hh));
-      list.push({ a, x: wp.x + ox, y: wp.y + oy, d, hw, hh });
+      list.push({ a, x: cx, y: wp.y + oy, d, hw, hh });
     }
     list.sort((p, q) => (p.a.isPlayer ? -1 : q.a.isPlayer ? 1 : p.d - q.d));
     const placed: typeof list = [];

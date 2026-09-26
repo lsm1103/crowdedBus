@@ -17,7 +17,7 @@ npm run dev        # 开发服务器，浏览器打开 http://localhost:5173
 npm run build      # 类型检查 + 产物构建到 dist/
 npm run preview    # 预览构建产物
 npm run smoke      # 无头冒烟测试：跑完一整局模拟，验证无崩溃
-npm run probe      # 平衡探针：6 种玩家策略各跑 90 局（约 3 分钟），校验"主动打法优于消极"
+npm run probe      # 平衡探针：6 种玩家策略各跑 90 局（约 1 分钟），校验"主动打法优于消极"
 npm run model:build  # 用 Blender 重新生成车模和街景（见下文）
 ~~~
 

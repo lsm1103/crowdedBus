@@ -21,9 +21,14 @@ export interface Profile {
     knockouts: number;
     seatSeconds: number;
   };
-  /** 累计量，用于角色解锁条件。 */
+  /**
+   * 累计量，用于角色解锁条件。
+   * 新加的字段（如 pushHits）在旧存档里不存在：read() 用 EMPTY.totals 打底再覆盖，缺的自动补 0。
+   */
   totals: {
     knockouts: number;
+    /** 有效推中别人的次数（兰姐解锁）。 */
+    pushHits: number;
     seatSeconds: number;
     survived: number;
   };
@@ -38,7 +43,7 @@ const EMPTY: Profile = {
   matches: 0,
   tutorialSkipped: false,
   best: { rank: 99, score: 0, knockouts: 0, seatSeconds: 0 },
-  totals: { knockouts: 0, seatSeconds: 0, survived: 0 },
+  totals: { knockouts: 0, pushHits: 0, seatSeconds: 0, survived: 0 },
   history: [],
   sound: true
 };
@@ -94,6 +99,8 @@ export interface MatchOutcome {
   rank: number;
   score: number;
   knockouts: number;
+  /** 本局有效推中次数。可缺省（按 0 记），免得别处构造结果时漏填就写坏存档。 */
+  pushHits?: number;
   seatSeconds: number;
   survived: boolean;
 }
@@ -117,6 +124,8 @@ export function applyMatchResult(o: MatchOutcome): string[] {
   }
   if (o.seatSeconds > p.best.seatSeconds) p.best.seatSeconds = o.seatSeconds;
   p.totals.knockouts += o.knockouts;
+  // 旧存档可能读出 NaN/undefined（被手改或写坏），这里兜底成数字再累加。
+  p.totals.pushHits = (Number.isFinite(p.totals.pushHits) ? p.totals.pushHits : 0) + (o.pushHits ?? 0);
   p.totals.seatSeconds += o.seatSeconds;
   if (o.survived) p.totals.survived++;
   p.matches++;

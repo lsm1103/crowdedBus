@@ -24,10 +24,18 @@ function ensure(): Ctx | null {
   return ctx;
 }
 
-/** 必须在用户手势里调用一次，否则 iOS 上永远没声音。 */
+/**
+ * 唤醒音频。必须在用户手势里调用，否则 iOS 上永远没声音。
+ *
+ * 不只是"第一次"：iOS 来电、切后台、插拔耳机都会把 AudioContext 打成 suspended，
+ * Safari 上还会是非标准的 'interrupted'。以前只在第一次触摸时唤醒一次，
+ * 被打断后点"继续"整局都没声音。现在每次触摸都调用它，已经在播就什么都不做。
+ */
 export function unlockAudio(): void {
   const c = ensure();
-  if (c && c.state === 'suspended') c.resume().catch(() => { /* 忽略 */ });
+  if (c && (c.state as string) !== 'running' && (c.state as string) !== 'closed') {
+    c.resume().catch(() => { /* 没有手势时会被拒绝，等下一次触摸 */ });
+  }
 }
 
 /**

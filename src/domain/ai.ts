@@ -18,6 +18,8 @@ export interface BotContext {
   seatFree: (id: number) => boolean;
   /** 扶手是否空着：以前 bot 只认最近的扶手，被占了也跑过去按，原地"抓空"。 */
   railFree: (id: number) => boolean;
+  /** 按技能现在能不能放出来（冷却 + 阿远身前放不放得下箱子）。别往墙上扔箱子。 */
+  canUseSkill: (id: number) => boolean;
   hotZone: HotZone;
   /** 静态寻路：绕开立杆、座垫、障碍物。 */
   nav: NavGrid;
@@ -87,6 +89,35 @@ const SEAT_ATTACK_RANGE = 8;
  */
 const BRAVE_BOTS: ReadonlySet<number> = new Set([1, 4, 6]);
 const BRAVE_PANIC_DIST = 1.0;
+/**
+ * 坏心眼的 bot：车门开着时（到站和终局），专挑离门最近、站着又没抓扶手的人，
+ * 绕到他靠车厢内侧的一边往门外推（和 probe 里的 SMART 打法同一个思路）。
+ *
+ * 以前 bot 只会"顺手推身边的人"：玩家抓扶手不动时，300 局里 74% 的局没有任何 bot 掉下车，
+ * 平均每局 0.33 次，"把对手挤下车"这条标语在对局里基本看不到。
+ * 现在同口径每局约 1.5 次、终局前约占六成、"0 次"的局约 23%。
+ *
+ * 只有 2 个：3 个时会抢走玩家进攻打法的猎物、推挤扇形还会连带把守在门边的玩家推下去
+ * （probe 里 SMART 存活率 91% → 71%）。坏心眼也不把玩家当目标、玩家在推挤扇形里时先不推 ——
+ * 新增的这股推力只在 bot 之间发生，玩家承受的压力和改前一样（普通 bot 照旧会推玩家）。
+ * probe 180 局对比：SITTER/BALANCED/TURTLE 存活率 90%/90%/88% → 92%/91%/88%。
+ */
+const BULLY_BOTS: ReadonlySet<number> = new Set([3, 7]);
+/** 离门多远以内的人算"值得推"的目标。 */
+const BULLY_RANGE = 3.0;
+
+/** 玩家是否在这个 bot 此刻推挤的扇形范围里（与 simulation 的推挤判定同一口径）。 */
+function playerInPushCone(char: CharacterState, ctx: BotContext): boolean {
+  const f = V2(Math.sin(char.facing), Math.cos(char.facing));
+  for (const o of ctx.characters) {
+    if (!o.isPlayer || !o.alive) continue;
+    const to = v2Sub(o.pos, char.pos);
+    const d = v2Len(to);
+    if (d > BALANCE.pushRange || d < 1e-6) continue;
+    if ((to.x * f.x + to.z * f.z) / d >= 0.25) return true;
+  }
+  return false;
+}
 
 const memory = new Map<number, BotMemory>();
 /** bot 记忆初始化也要走对局种子，否则同一 seed 跑两次结果不同。 */
@@ -173,6 +204,54 @@ function engage(char: CharacterState, target: Vec2, canPush: boolean): { move: V
   return { move: V2(), push: true };
 }
 
+/**
+ * 坏心眼的一步：挑目标 → 绕到他内侧 → 朝门的方向推。没有合适目标返回 null（照常做别的事）。
+ * 目标只挑站着、没抓扶手的 bot：抓着扶手的人只吃 30% 推力，推不出去；玩家不挑（见 BULLY_BOTS）。
+ */
+function bully(
+  char: CharacterState, ctx: BotContext, doors: Vec2[], m: BotMemory, rnd: () => number
+): InputFrame | null {
+  let victim: CharacterState | null = null;
+  let door = V2();
+  let best = BULLY_RANGE;
+  for (const o of ctx.characters) {
+    if (o.id === char.id || !o.alive || o.seatId !== null || o.grabHandrail !== null) continue;
+    if (o.isPlayer) continue;
+    for (const d of doors) {
+      const x = v2Dist(o.pos, d);
+      if (x < best) { best = x; victim = o; door = d; }
+    }
+  }
+  if (!victim) return null;
+  const buttons = new Set<Button>();
+  if (char.grabHandrail !== null) return { move: V2(), buttons: btnSet('interact') };
+  const out = v2Norm(v2Sub(door, victim.pos));
+  const toVictim = v2Sub(victim.pos, char.pos);
+  const dist = v2Len(toVictim);
+  const lined = dist > 1e-3 && (toVictim.x * out.x + toVictim.z * out.z) / dist > 0.5;
+  // 还没站到他内侧：绕过去（寻路会绕开立杆和人堆）。
+  if (!(lined && dist <= BALANCE.pushRange * 0.95)) {
+    const spot = V2(victim.pos.x - out.x * 1.05, victim.pos.z - out.z * 1.05);
+    return { move: go(char, ctx, spot), buttons };
+  }
+  // 站好了：对准就推；推挤冷却中就用身体往门那边顶。
+  // （试过冷却中冲刺顶人：冲刺把自己也带到门边，掉车数反而降了，不用。）
+  if (char.pushCd <= 0 && m.pushTimer <= 0) {
+    const e = engage(char, victim.pos, true);
+    if (e.push && playerInPushCone(char, ctx)) {
+      // 推挤是扇形范围，玩家站在旁边会被一起推出去：等他走开再推。
+      return { move: V2(), buttons };
+    }
+    if (e.push) {
+      buttons.add('push');
+      m.pushTimer = 0.4 + rnd() * 0.5;
+      return { move: V2(), buttons };
+    }
+    return { move: e.move, buttons };
+  }
+  return { move: v2Norm(toVictim), buttons };
+}
+
 /** 单个机器人的决策：返回本帧输入。 */
 export function decideBot(
   char: CharacterState,
@@ -224,6 +303,13 @@ export function decideBot(
     }
   } else {
     m.panic = 0.25 + rnd() * 0.5;
+  }
+
+  // 1.2) 坏心眼的：车门开着时，把离门最近的人往门外推。
+  if (BULLY_BOTS.has(char.id) && char.seatId === null && doors.length
+    && (ctx.phase === 'driving' || ctx.phase === 'finale')) {
+    const b = bully(char, ctx, doors, m, rnd);
+    if (b) return b;
   }
 
   // 1.5) 胆大的：到站开门、黄圈正好贴在门口时，优先去门口刷分（到了就站住）。
@@ -356,7 +442,7 @@ export function decideBot(
         move = e.move;
       }
     }
-    if (char.skillCd <= 0 && m.skillTimer <= 0 && d < 2.4) {
+    if (char.skillCd <= 0 && m.skillTimer <= 0 && d < 2.4 && ctx.canUseSkill(char.id)) {
       buttons.add('skill');
       m.skillTimer = 5 + rnd() * 5;
     }
@@ -386,7 +472,7 @@ export function decideBot(
     }
     m.pushTimer = 1.2 + rnd() * 1.8;
   }
-  if (m.skillTimer <= 0 && char.skillCd <= 0) {
+  if (m.skillTimer <= 0 && char.skillCd <= 0 && ctx.canUseSkill(char.id)) {
     buttons.add('skill');
     m.skillTimer = 6 + rnd() * 6;
   }

@@ -30,6 +30,21 @@ const REPLAN_EVERY = 0.5;
 const REPLAN_MIN = 0.2;
 /** 视线前瞻：沿路径最多往前看这么远挑直达点（米）。 */
 const LOOKAHEAD = 2.5;
+/**
+ * 计算预算：每个模拟步最多重算这么多条路径，其余 bot 沿用旧路径、排到下一步优先算。
+ * 以前多个 bot 同一帧重算，单步最长 5~7ms（Node 实测），一帧就掉了。
+ * 1 条就够：7 个 bot 正常每秒只需重算约 14 次（每人 0.5 秒一次），预算每秒 60 次。
+ * 150 局实测（同一份代码）：预算 1 时 >2ms 的步 1 个，预算 2 时 25 个，卡死次数无差别。
+ */
+export const REPLANS_PER_STEP = 1;
+/**
+ * 单次 A* 最多展开这么多格（约 0.7ms）。超了就返回"离目标最近的那一段"，
+ * bot 先走过去，下次再从更近处接着算 —— 长路径被拆成几段，不会单帧卡顿。
+ * 实测不封顶时 p99 4700 格、最多 6600 格（约 2.5ms）。
+ */
+const MAX_EXPAND = 3000;
+/** 启发式加权：略牺牲最优性（路径长一点点），换展开格数大幅下降。 */
+const H_WEIGHT = 1.3;
 /** 到投影后的目标点这么近就算到了，停下不再"想走"。 */
 export const ARRIVE_DIST = 0.12;
 
@@ -55,6 +70,10 @@ export class NavGrid {
   private readonly stamp: Uint32Array;
   private readonly closedStamp: Uint32Array;
   private gen = 0;
+  /** 本步剩余的重算次数；上一步被推迟、本步优先的 bot；本步被推迟的 bot。 */
+  private budget = Infinity;
+  private priority = new Set<number>();
+  private deferred = new Set<number>();
   /** 临时障碍（实心行李），每帧由模拟更新。 */
   private dynamic: Rect[] = [];
 
@@ -113,6 +132,19 @@ export class NavGrid {
   reset() {
     this.cache.clear();
     this.dynamic = [];
+    this.budget = Infinity;
+    this.priority = new Set();
+    this.deferred = new Set();
+  }
+
+  /**
+   * 开始新的一个模拟步：重算预算回满，上一步被推迟的 bot 本步优先。
+   * 由 Simulation 在每步结束时调用（下一步的玩家输入和 bot 决策共用这份预算）。
+   */
+  beginStep(maxReplans: number = REPLANS_PER_STEP) {
+    this.priority = this.deferred;
+    this.deferred = new Set();
+    this.budget = maxReplans;
   }
 
   /** 登记本帧的临时障碍（行李只存在几秒，不重建网格，查询时现算）。 */
@@ -214,16 +246,23 @@ export class NavGrid {
       const dz = Math.abs(Math.floor(c / this.cols) - gz);
       return Math.max(dx, dz) + (Math.SQRT2 - 1) * Math.min(dx, dz);
     };
+    // 离目标最近的已展开格：展开数超限或目标不可达时，返回到它为止的那一段。
+    let bestNode = start;
+    let bestH = h(start);
+    let expanded = 0;
     g[start] = 0;
     came[start] = -1;
     seen[start] = gen;
-    heap.push(start, h(start));
+    heap.push(start, h(start) * H_WEIGHT);
     let found = false;
     while (heap.size) {
       const cur = heap.pop();
       if (cur === goal) { found = true; break; }
       if (closed[cur] === gen) continue;
       closed[cur] = gen;
+      const hc = h(cur);
+      if (hc < bestH) { bestH = hc; bestNode = cur; }
+      if (++expanded > MAX_EXPAND) break;
       const ci = cur % this.cols;
       const cj = Math.floor(cur / this.cols);
       for (let dj = -1; dj <= 1; dj++) {
@@ -242,14 +281,15 @@ export class NavGrid {
             g[nb] = ng;
             seen[nb] = gen;
             came[nb] = cur;
-            heap.push(nb, ng + h(nb));
+            heap.push(nb, ng + h(nb) * H_WEIGHT);
           }
         }
       }
     }
-    if (!found) return [];
+    const end = found ? goal : bestNode;
+    if (end === start) return [];
     const path: number[] = [];
-    for (let c = goal; c !== -1 && c !== start; c = came[c]) path.push(c);
+    for (let c = end; c !== -1 && c !== start; c = came[c]) path.push(c);
     return path.reverse();
   }
 
@@ -273,8 +313,18 @@ export class NavGrid {
     const stale = !plan || time - plan.at > REPLAN_EVERY
       || (plan.goalCell !== goalCell && time - plan.at > REPLAN_MIN);
     if (stale) {
-      plan = { goalCell, path: this.astar(startCell, goalCell), at: time };
-      this.cache.set(id, plan);
+      // 预算：上一步被推迟的先算；其余人只有在预算比"排队的人数"多时才能插队。
+      const mayPlan = this.budget > 0 && (this.priority.has(id) || this.budget > this.priority.size);
+      if (mayPlan) {
+        this.budget--;
+        this.priority.delete(id);
+        plan = { goalCell, path: this.astar(startCell, goalCell), at: time };
+        this.cache.set(id, plan);
+      } else {
+        // 轮不到：沿用旧路径；一条都没有就先朝目标直走一步，下一步优先重算。
+        this.deferred.add(id);
+        if (!plan) return { dir: unit(goalPt.x - pos.x, goalPt.z - pos.z), arrived: false };
+      }
     }
     plan = plan!;
     // 真不可达（目标投影落进了封闭的小口袋）：原地等下一次重算，别朝着墙顶。

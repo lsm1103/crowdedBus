@@ -20,13 +20,15 @@ initOrientation();
 setupSoundToggles();
 
 // iOS / 微信要求音频上下文由用户手势解锁。
-const unlockOnce = () => {
-  unlockAudio();
-  window.removeEventListener('pointerdown', unlockOnce);
-  window.removeEventListener('touchstart', unlockOnce);
-};
-window.addEventListener('pointerdown', unlockOnce);
-window.addEventListener('touchstart', unlockOnce);
+// 监听常驻、不移除：来电、切后台之后音频会被系统挂起，要在下一次触摸（比如点"继续"）时再唤醒。
+// 已经在播放时 unlockAudio 什么都不做，每次触摸都调用没有开销。
+const wake = () => unlockAudio();
+window.addEventListener('pointerdown', wake, { capture: true, passive: true });
+window.addEventListener('touchstart', wake, { capture: true, passive: true });
+// 从后台切回来先试一次：安卓上不需要手势就能恢复；iOS 会被拒绝，等下一次触摸。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) unlockAudio();
+});
 
 const loading = document.getElementById('loading')!;
 const loadingBar = document.getElementById('loading-bar')!;

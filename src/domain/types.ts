@@ -55,6 +55,8 @@ export interface CharacterState {
   scoreParts: { seat: number; zone: number; knockout: number; survive: number; push: number };
   /** 击落数。 */
   knockouts: number;
+  /** 有效推中别人的次数（行驶/终局，推空不算）。兰姐的解锁条件按它累计。 */
+  pushHits: number;
   /** 实际坐在座位上的秒数。不能用座位分反推 —— 那个带拥挤度和专座倍率。 */
   seatSeconds: number;
   /** 最后一次把我推中的人；用于击落归属。 */
@@ -120,7 +122,11 @@ export type GameEvent =
   | { type: 'grab'; charId: number; railId: number }
   | { type: 'release'; charId: number }
   | { type: 'grabFail'; charId: number }
-  | { type: 'skillFail'; charId: number }
+  /**
+   * 技能没放出来。reason 决定提示文案：cooldown = 还在冷却；
+   * blocked = 身前放不下（阿远的行李箱被墙/座垫/立杆/坐着的人挡住），不进冷却，换个方向再按就行。
+   */
+  | { type: 'skillFail'; charId: number; reason: 'cooldown' | 'blocked' }
   | { type: 'hit'; charId: number }
   | { type: 'eliminate'; charId: number }
   | { type: 'respawn'; charId: number }

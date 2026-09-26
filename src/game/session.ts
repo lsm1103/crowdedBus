@@ -376,7 +376,8 @@ export class Game {
       case 'skillFail':
         if (e.charId === 0) {
           SFX.fail();
-          this.hud.toastText('技能冷却中', 'fail');
+          // 以前一律说"冷却中"，阿远身前放不下箱子时玩家会以为按钮坏了。
+          this.hud.toastText(e.reason === 'blocked' ? '前面放不下行李' : '技能冷却中', 'fail');
         }
         break;
       case 'eliminate': {
@@ -625,6 +626,7 @@ export class Game {
       total: this.sim.characters.length,
       score: Math.round(me.score),
       knockouts: me.knockouts,
+      pushHits: me.pushHits,
       seatSeconds: Math.round(me.seatSeconds),
       survived: me.alive
     };
