@@ -15,14 +15,10 @@ export const v2Norm = (a: Vec2): Vec2 => {
   const l = v2Len(a);
   return l < 1e-6 ? V2() : { x: a.x / l, z: a.z / l };
 };
-export const v2Dot = (a: Vec2, b: Vec2): number => a.x * b.x + a.z * b.z;
 
 export const clamp = (v: number, lo: number, hi: number): number =>
   v < lo ? lo : v > hi ? hi : v;
 export const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
-/** 平滑阻尼插值（帧率无关近似）。 */
-export const damp = (a: number, b: number, lambda: number, dt: number): number =>
-  lerp(a, b, 1 - Math.exp(-lambda * dt));
 
 const TAU = Math.PI * 2;
 

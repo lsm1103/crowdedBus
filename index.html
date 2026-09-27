@@ -17,6 +17,7 @@
     <meta name="screen-orientation" content="landscape" />
     <meta name="full-screen" content="yes" />
     <title>好挤的大巴</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <style>
       :root {
         --c-bg:#12253C; --c-mint:#4ECEB6; --c-coral:#FF7A6B; --c-lemon:#FFD23F; --c-text:#f7fbff;
@@ -83,7 +84,7 @@
       h1 { margin: 0; font-size: clamp(22px, calc(var(--sh) * 5.2), 40px); letter-spacing: 2px; }
       h1 .accent { color: var(--c-coral); }
       .sub { margin: 0; font-size: clamp(11px, calc(var(--sh) * 1.9), 15px); color: #a8c3e8; }
-      .hint { margin: 0; font-size: clamp(9px, calc(var(--sh) * 1.5), 12px); color: #7e9cc4; letter-spacing:.3px; }
+      .hint { margin: 0; font-size: clamp(10.5px, calc(var(--sh) * 1.5), 12px); color: #7e9cc4; letter-spacing:.3px; }
       .panel {
         background:linear-gradient(145deg,rgba(17,53,77,.86),rgba(8,25,46,.84)); border:1px solid rgba(185,238,247,.25);
         box-shadow:0 18px 48px rgba(2,10,24,.32), inset 0 1px rgba(255,255,255,.12); border-radius:18px;
@@ -107,7 +108,7 @@
       .portrait::after { content:""; position:absolute; inset:0; background:linear-gradient(135deg,var(--accent),transparent 45%); mix-blend-mode:soft-light; opacity:.45; }
       .char-copy { position:absolute; bottom:0; left:0; right:0; padding:5px 7px; text-align:left; }
       .char-card .name { font-weight:900; font-size:clamp(10px,calc(var(--sh) * 1.7),13px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .char-card .skill { font-size:clamp(8px,calc(var(--sh) * 1.35),10px); color:#cfecf4; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .char-card .skill { font-size:clamp(10px,calc(var(--sh) * 1.35),11px); color:#cfecf4; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
       /* 选中角色的技能详情：卡片塞不下完整描述，单独一条 */
       #skill-detail {
         display:flex; align-items:baseline; justify-content:center; gap:10px; flex-wrap:nowrap;
@@ -116,7 +117,7 @@
       }
       .sd-name { font-weight:900; font-size:clamp(11px,calc(var(--sh) * 2.1),15px); white-space:nowrap; }
       .sd-desc { font-size:clamp(10px,calc(var(--sh) * 1.8),13px); color:#dbeaff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .sd-cd { font-size:clamp(9px,calc(var(--sh) * 1.5),11px); color:#8fa9c9; white-space:nowrap; }
+      .sd-cd { font-size:clamp(10.5px,calc(var(--sh) * 1.5),11px); color:#8fa9c9; white-space:nowrap; }
 
       .selected-mark { position:absolute; top:5px; right:5px; width:20px; height:20px; border-radius:50%; display:none; align-items:center; justify-content:center; background:var(--c-lemon); color:#26364a; font-weight:900; font-size:12px; }
       .char-card.selected .selected-mark { display:flex; }
@@ -150,9 +151,9 @@
         background:rgba(8,20,36,.8);
         color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.7); text-align:center; line-height:1.25;
       }
-      .char-card .lock-name { font-size:clamp(9px,calc(var(--sh) * 1.7),12px); font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
-      .char-card .lock-desc { font-size:9px; color:#dbeaff; }
-      .char-card .lock-progress { font-size:9px; color:var(--c-lemon); font-weight:800; }
+      .char-card .lock-name { font-size:clamp(11px,calc(var(--sh) * 1.7),12px); font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+      .char-card .lock-desc { font-size:10.5px; color:#dbeaff; }
+      .char-card .lock-progress { font-size:10.5px; color:var(--c-lemon); font-weight:800; }
 
       /*
        * 战绩图浮层。它在 #stage 外面、不跟舞台旋转，所以安全区直接用 env()，
@@ -227,7 +228,7 @@
         background:linear-gradient(145deg,rgba(20,52,82,.9),rgba(8,24,42,.78)); border:1px solid rgba(255,255,255,.2);
         box-shadow:0 5px 16px rgba(3,12,24,.22); border-radius:11px; padding:6px 9px; display:flex; flex-direction:column; gap:3px;
       }
-      .hud-label { font-size:9px; line-height:1; color:#bdd4ed; letter-spacing:.5px; }
+      .hud-label { font-size:10.5px; line-height:1; color:#bdd4ed; letter-spacing:.5px; }
       .hud-value { font-size:16px; line-height:1.05; font-weight:900; color:var(--c-text); font-variant-numeric:tabular-nums; }
       #crowd-box { width:150px; }
       #crowd-head { display:flex; justify-content:space-between; align-items:baseline; }
@@ -349,7 +350,7 @@
         transition:transform .07s, filter .12s;
       }
       .act-btn::first-line { font-size:calc(18 * var(--u)); }
-      #skill-name, #interact-name { font-size:calc(9 * var(--u)); letter-spacing:0; }
+      #skill-name, #interact-name { font-size:calc(10 * var(--u)); letter-spacing:0; white-space:nowrap; }
       /* 首局引导。刻意不做全屏遮罩：摇杆是左半屏动态起按，
          任何盖在上面的遮罩都会吃掉 pointerdown，玩家会"照着教程做却动不了"。 */
       #tut-bubble {
@@ -365,7 +366,7 @@
         position:absolute; right:calc(var(--sa-right) + 10px); top:calc(var(--sa-top) + 52px);
         pointer-events:auto; cursor:pointer;
         background:rgba(8,24,42,.7); border:1px solid rgba(255,255,255,.2);
-        color:#bdd4ed; font-size:10px; padding:4px 10px; border-radius:999px;
+        color:#bdd4ed; font-size:11px; padding:4px 10px; border-radius:999px;
       }
       .tut-pulse { animation:tutPulse 1s ease-in-out infinite; }
       @keyframes tutPulse {
@@ -444,7 +445,11 @@
       }
       #loading.hidden { display: none; }
       #loading .bar { width:min(220px,50vw); height:6px; border-radius:6px; background:rgba(255,255,255,.14); overflow:hidden; }
-      #loading .bar i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#22c1a6,#ffd23f); transition:width .25s; }
+      /* 加载页只在 JS 下载期间出现，拿不到进度，用来回滑动的条表示"在动"。模型的进度显示在大厅的开始按钮上。 */
+      #loading .bar i { display:block; height:100%; width:35%; border-radius:6px; background:linear-gradient(90deg,#22c1a6,#ffd23f); animation:loadSlide 1.1s ease-in-out infinite alternate; }
+      @keyframes loadSlide { from { transform:translateX(-10%); } to { transform:translateX(195%); } }
+      .btn:disabled { opacity:.7; cursor:default; filter:saturate(.6); }
+      .btn:disabled:active { transform:none; }
 
       /* 音效开关。大厅：右上角图标（标题居中、选角面板在标题下方，角落是空的）；
          暂停页：一颗带文字的按钮，和"继续/退出"区分开，看得出是设置而不是动作。 */
@@ -555,7 +560,7 @@
 
       <div id="loading">
         <div>好挤的大巴</div>
-        <div class="bar"><i id="loading-bar"></i></div>
+        <div class="bar"><i></i></div>
         <div class="dim" style="font-size:11px">正在把乘客塞上车…</div>
       </div>
 

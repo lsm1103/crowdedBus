@@ -19,9 +19,6 @@ let probe: HTMLElement | null = null;
 let rotation: 0 | 90 = 0;
 const listeners: Listener[] = [];
 
-/** 当前舞台相对屏幕的旋转角度（度）。0 = 未旋转，90 = 强制横屏中。 */
-export const getStageRotation = (): 0 | 90 => rotation;
-
 /** 把屏幕坐标系下的位移换算成舞台局部坐标系下的位移。 */
 export function toStageDelta(dxClient: number, dyClient: number): { x: number; y: number } {
   // rotate(90deg) 把局部 (x,y) 映射成屏幕 (-y, x)，这里做它的逆变换。

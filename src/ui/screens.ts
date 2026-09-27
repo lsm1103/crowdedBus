@@ -16,6 +16,18 @@ export interface ResultRow {
 let selected = CHARACTERS[0].id;
 let lobbyOnStart: ((charId: string) => void) | null = null;
 
+/**
+ * "开始上车"是否可点。
+ * 大厅在 JS 到位后立刻显示，车模和街景在后台加载；加载完之前按钮显示进度、点了也没反应。
+ * progress：0~1。
+ */
+export function setStartReady(ready: boolean, progress = 0): void {
+  const start = document.getElementById('btn-start') as HTMLButtonElement | null;
+  if (!start) return;
+  start.disabled = !ready;
+  start.textContent = ready ? '开始上车' : `正在备车 ${Math.round(progress * 100)}%`;
+}
+
 /** 初始化大厅选角；点击开始触发 onStart。 */
 export function setupLobby(onStart: (charId: string) => void): void {
   lobbyOnStart = onStart;

@@ -10,8 +10,6 @@ export interface InputFrame {
   buttons: Set<Button>;
 }
 
-export const emptyFrame = (): InputFrame => ({ move: V2(), buttons: new Set() });
-
 const DEADZONE = 0.16;
 
 /**

@@ -205,9 +205,3 @@ export function distToRect(p: Vec2, r: Rect): number {
 export function seatFrontPoint(seat: Seat, radius: number, margin = 0.03): Vec2 {
   return { x: seat.cushion.maxX + radius + margin, z: seat.z };
 }
-
-/** 判断点是否在车厢内部。 */
-export function insideInterior(p: Vec2): boolean {
-  const r = INTERIOR;
-  return p.x >= r.minX && p.x <= r.maxX && p.z >= r.minZ && p.z <= r.maxZ;
-}
