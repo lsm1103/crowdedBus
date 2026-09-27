@@ -85,7 +85,8 @@ function normalize(raw: Record<string, unknown>): Profile {
     roundWins: count(best.roundWins),
     streak: Math.max(count(best.streak), p.streak)
   };
-  p.lastCharId = typeof raw.lastCharId === 'string' ? raw.lastCharId : null;
+  // 主播小麦改名时尚姐阿娇（id 跟角色工程统一成 ajia）。
+  p.lastCharId = raw.lastCharId === 'xiaomai' ? 'ajia' : typeof raw.lastCharId === 'string' ? raw.lastCharId : null;
   p.tutorialSkipped = raw.tutorialSkipped === true;
   p.history = Array.isArray(raw.history)
     ? raw.history

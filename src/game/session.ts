@@ -109,6 +109,7 @@ export class Game {
     this.scenery.setCamera(this.scene.camera);
     // 摔下车的人、上下车的路人都要落在真实地面上。
     this.actors.setGround(this.scenery);
+    this.actors.setRailAnchor((id) => this.busView.railAnchor(id));
     this.npcView.setGround(this.scenery);
 
     const hudRoot = document.getElementById('hud')!;
@@ -571,7 +572,7 @@ export class Game {
     }
     // 扶手锚点是车身坐标，车身会倾斜；手的位置是世界坐标。两端统一换成世界坐标再连。
     const anchor = this.busView.group.localToWorld(this.tmpAnchor.copy(local));
-    this.grabLink.show(actor.handPosition(this.tmp, local), anchor);
+    this.grabLink.show(actor.handPosition(this.tmp), anchor);
   }
 
   /** 整场结束：按回合胜场排名，写存档，出结算。 */

@@ -17,7 +17,7 @@ export function asset(path: string): string {
 /** 8 个角色的立绘文件名（不含扩展名）。 */
 export const ROLE_PORTRAITS: Record<string, string> = {
   xiaoli: '打工人小李', xiaoxia: '学生小夏', aqiang: '健身哥阿强', lanjie: '买菜阿姨兰姐',
-  ayuan: '旅行者阿远', xiaomai: '时尚姐阿娇', amo: '社恐阿默', laozhou: '睡神老周'
+  ayuan: '旅行者阿远', ajia: '时尚姐阿娇', amo: '社恐阿默', laozhou: '睡神老周'
 };
 
 export const rolePortrait = (id: string): string => asset(`roles/${ROLE_PORTRAITS[id]}.jpg`);

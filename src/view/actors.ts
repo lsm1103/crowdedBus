@@ -1,12 +1,8 @@
 import * as THREE from 'three';
 import type { CharacterState } from '../domain/types';
-import { BALANCE } from '../config/balance';
-import { APPEARANCE, HAIR_SCALE } from '../config/appearance';
-import { buildAccessories } from './accessories';
 import { setMaterialTransparent } from './models';
+import { CharacterBody, CHAR_HEIGHT, emptyPose, resetPose, type Pose } from './character';
 
-/** 一步的世界距离。步频 = 速度 / 步长，这样慢走快走都不打滑。 */
-const STRIDE = 0.62 * (BALANCE.characterRadius / 0.42);
 /** 推挤动作时长。 */
 const PUSH_DUR = 0.3;
 
@@ -15,19 +11,26 @@ const LABEL_MAX_DIST = 18;
 /** 名字牌尺寸补偿的参考距离：太近不放大到糊脸，太远不小到看不清。 */
 const LABEL_REF_DIST = 4;
 
-/** 人偶按碰撞半径等比放大：车厢收窄后光靠缩车厢还不够挤。 */
-const MODEL_SCALE = BALANCE.characterRadius / 0.42;
-
 /**
  * 坐姿对齐。座垫顶面在 y=0.46（scripts/blender/build_models.py 的座椅）。
- * 占位人偶是"豆子"体型：躯干胶囊的下端（未缩放 0.14）就是屁股，腿只是露在前面的短桩。
- * 以前整体下沉 0.5，躯干直接穿过座垫插进地板；现在让屁股落在座垫上、略陷进去一点。
- * 换正式角色模型时，只需要把 PELVIS_Y 换成新模型髋部的高度。
+ * 大腿放平后，大腿根往下 THIGH_R 就是屁股底面；让它落在座垫上、略陷进去一点。
+ * 座位坐标是座垫中心，人要往靠背方向挪 SIT_BACK，背才贴得上靠背。
  */
 const SEAT_TOP = 0.46;
-const PELVIS_Y = 0.14;
-const SEAT_SINK = 0.08;
-const SIT_LIFT = SEAT_TOP - PELVIS_Y * MODEL_SCALE - SEAT_SINK;
+const SEAT_SINK = 0.03;
+const THIGH_R = 0.09;
+const SIT_BACK = 0.25;
+
+/**
+ * 身体的转轴高度（腰）。摔倒、被拎、被扔都绕腰转：绕脚底转的话，
+ * 人躺下时整个身子会甩到身后一米多，压到别人和墙里。
+ */
+const PIVOT = 0.42 * CHAR_HEIGHT;
+/** 躺在地上时腰离地的高度（身体厚度的一半）。 */
+const LIE_Y = 0.16;
+/** 肩膀在角色局部坐标里的位置（伸手瞄准扶手/别人时从这里出发）。+x 是左手边。 */
+const SHOULDER_X = 0.2;
+const SHOULDER_Y = 0.66 * CHAR_HEIGHT;
 
 /** 名字牌离镜头比这更近就淡出：贴脸的名字牌会盖住半个屏幕。 */
 const LABEL_NEAR_HIDE = 2.2;
@@ -57,13 +60,19 @@ export interface GroundInfo {
   readonly driftZ: number;
 }
 
+/** 每帧给角色的环境信息：伸手要够到的东西在哪（车厢坐标）。 */
+export interface ActorWorld {
+  characters: CharacterState[];
+  railAnchor(id: number): THREE.Vector3 | null;
+}
+
 /**
  * 挡视线淡出。越肩镜头从玩家背后斜着往下看，站在镜头和玩家之间的人会把玩家整个盖住。
  * 判定放在屏幕空间里做：离镜头更近、且在屏幕上盖住玩家身体超过 OCCLUDER_COVER 的人淡成虚影。
  * （三维里"离视线近"不行：镜头高，视线从挡路人的头顶上方一米多穿过，但画面上照样盖住了人。）
  */
-const BODY_TOP = 1.9 * MODEL_SCALE;
-const BODY_HALF_W = 0.42 * MODEL_SCALE;
+const BODY_TOP = CHAR_HEIGHT + 0.1;
+const BODY_HALF_W = 0.45;
 const OCCLUDER_COVER = 0.25;
 const OCCLUDER_ALPHA = 0.28;
 
@@ -74,20 +83,8 @@ const STUN_REF = 0.42;
 /** 被扔出去时抛物线的最高点（格）。 */
 const THROW_ARC = 0.9;
 
-function darken(hex: string, f: number): number {
-  const c = new THREE.Color(hex);
-  c.multiplyScalar(f);
-  return c.getHex();
-}
-
-/** 共享几何体：8 个人偶用同一批 geometry，只有材质按颜色分。 */
+/** 共享几何体：脚下的标记，8 个人共用。 */
 const GEO = {
-  torso: new THREE.CapsuleGeometry(0.3, 0.36, 6, 12),
-  arm: new THREE.CapsuleGeometry(0.1, 0.3, 5, 8),
-  leg: new THREE.CapsuleGeometry(0.115, 0.22, 5, 8),
-  head: new THREE.SphereGeometry(0.3, 16, 14),
-  hair: new THREE.SphereGeometry(0.305, 16, 12),
-  eye: new THREE.SphereGeometry(0.038, 8, 8),
   shadow: new THREE.CircleGeometry(0.46, 20),
   ring: new THREE.RingGeometry(0.44, 0.56, 26),
   grabRing: new THREE.TorusGeometry(0.6, 0.048, 8, 22),
@@ -95,9 +92,6 @@ const GEO = {
 };
 
 const SHARED = {
-  skin: new THREE.MeshLambertMaterial({ color: 0xf2c9a0 }),
-  hair: new THREE.MeshLambertMaterial({ color: 0x263141 }),
-  eye: new THREE.MeshLambertMaterial({ color: 0x1b2733 }),
   shadow: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.24 }),
   grab: new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.9 }),
   playerArrow: new THREE.MeshBasicMaterial({ color: 0xffd23f })
@@ -139,16 +133,38 @@ function labelTexture(name: string, color: string, isPlayer: boolean): THREE.Tex
   return t;
 }
 
-/** 单个人偶（含影子、配色地环、抓环、昵称、玩家指示箭头）。 */
+const ease = (k: number, dt: number) => 1 - Math.exp(-k * dt);
+const _t = new THREE.Vector3();
+const _h = new THREE.Vector3();
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+
+/** 身体材质和它本来的透明设定（兰姐的菜袋本来就是半透明的，淡回去时不能变成实心）。 */
+interface BodyMat {
+  m: THREE.Material;
+  opacity: number;
+  transparent: boolean;
+}
+
+/**
+ * 单个角色：正式模型 + 影子、配色地环、抓环、昵称、玩家指示箭头。
+ *
+ * 节点层级：group（位置、朝向）→ lean（踉跄，绕脚底歪）→ flop（摔倒/被拎/被扔，绕腰转）→ 模型。
+ * 脚下的标记挂在 group 上，人怎么歪它们都平贴地面。
+ */
 export class Actor {
   group: THREE.Group;
-  private rig = new THREE.Group();
+  private lean = new THREE.Group();
+  private flopG = new THREE.Group();
+  private body: CharacterBody;
+  private pose: Pose = emptyPose();
   private materials: THREE.Material[] = [];
   private grabRing: THREE.Mesh;
   private colorRing: THREE.Mesh;
-  /** 抓人时双手前伸的程度、摔倒/被拖/被扔时身体软掉的程度（0~1，平滑过渡用）。 */
+  /** 抓人时双手前伸、抓扶手时单手够过去、摔倒/被拖/被扔时身体软掉的程度（0~1，平滑过渡用）。 */
   private reach = 0;
+  private armLift = 0;
   private flop = 0;
+  private sitBlend = 0;
   private nameLabel: THREE.Sprite;
   private labelMat: THREE.SpriteMaterial;
   /** 名字牌当前透明度与目标（由 ActorManager 做屏幕空间去重后给出）。 */
@@ -159,17 +175,10 @@ export class Actor {
   private labelBaseW: number;
   private labelBaseH: number;
   private selfMarkers = true;
-  /** 两条手臂及其"手"锚点，用来抬手抓扶手并把连接线从手掌连出去。 */
-  private armL: THREE.Mesh;
-  private armR: THREE.Mesh;
-  private legL: THREE.Mesh;
-  private legR: THREE.Mesh;
-  private head!: THREE.Group;
-  /** 步态相位。步频跟实际速度成正比，否则慢走时脚会打滑。 */
-  private gait = 0;
   private lastX = 0;
   private lastZ = 0;
-  private speed01 = 0;
+  /** 平滑后的实际移动速度（世界单位/秒），走跑动作的播放速率跟着它。 */
+  private speed = 0;
   /** 推挤动作计时（定时动作，不能读 status —— 它下一帧就被覆盖回 idle 了）。 */
   private pushTimer = 0;
   /** 淘汰摔飞演出。 */
@@ -181,80 +190,37 @@ export class Actor {
   } | null = null;
   /** 摔下车后的淡出系数，和挡视线淡出相乘。 */
   private koAlpha = 1;
-  private shadow!: THREE.Mesh;
+  private shadow: THREE.Mesh;
   /** 由 ActorManager 在每帧 update 前设置。 */
   ground: GroundInfo | null = null;
-  private sitBlend = 0;
-  private handL = new THREE.Object3D();
-  private handR = new THREE.Object3D();
-  private armLift = 0;
   /** 离镜头太近时的名字牌淡出系数（0~1）。 */
   labelNear = 1;
   /** 身体材质（不含脚下的环、影子这类标记），挡视线时整体淡出。 */
-  private bodyMats: THREE.Material[] = [];
+  private bodyMats: BodyMat[] = [];
   private bodyAlpha = 1;
   /** 由 ActorManager 每帧给出：这个人是否挡在镜头和玩家之间。 */
   occluding = false;
-  private liftRight = true;
+  /** 抓扶手用哪只手：0 = 左，1 = 右（离扶手近的那只）。 */
+  private railHand: 0 | 1 = 1;
+  /** 坐下时身体下沉多少（负数），由模型的腿长算出。 */
+  private sitLift: number;
 
   constructor(defId: string, color: string, name: string, isPlayer: boolean) {
     this.isPlayer = isPlayer;
     this.group = new THREE.Group();
-    this.rig.scale.setScalar(MODEL_SCALE);
-    this.group.add(this.rig);
-
-    // 外观规格：把大厅立绘里"隔几米一眼能认出"的特征做进对局模型。
-    // 找不到规格时退回按角色配色（保证新增角色不会崩）。
-    const look = APPEARANCE[defId] ?? {
-      top: new THREE.Color(color).getHex(), bottom: darken(color, 0.6),
-      hair: 0x263141, hairStyle: 'short' as const,
-      accent: new THREE.Color(color).getHex(), accessories: []
-    };
-    const mainMat = new THREE.MeshLambertMaterial({ color: look.top });
-    const legMat = new THREE.MeshLambertMaterial({ color: look.bottom });
-    const hairMat = new THREE.MeshLambertMaterial({ color: look.hair });
-    this.materials.push(mainMat, legMat, hairMat);
-
-    const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number, rz = 0) => {
-      const mesh = new THREE.Mesh(geo, m);
-      mesh.position.set(x, y, z);
-      mesh.rotation.z = rz;
-      this.rig.add(mesh);
-      return mesh;
-    };
-
-    // 模型正面朝 +z：rotation.y = facing 时，脸正好朝着移动方向。
-    add(GEO.torso, mainMat, 0, 0.62, 0);
-    this.armL = add(GEO.arm, mainMat, -0.36, 0.62, 0, -0.2);
-    this.armR = add(GEO.arm, mainMat, 0.36, 0.62, 0, 0.2);
-    // 手在胶囊远离肩膀的那一端；挂成子节点后，手臂怎么转它都跟着，
-    // getWorldPosition 拿到的就是真实手掌位置。
-    this.handL.position.set(0, -0.26, 0);
-    this.handR.position.set(0, -0.26, 0);
-    this.armL.add(this.handL);
-    this.armR.add(this.handR);
-    this.legL = add(GEO.leg, legMat, -0.14, 0.2, 0);
-    this.legR = add(GEO.leg, legMat, 0.14, 0.2, 0);
-    // 头做成独立节点：配件（头带/头巾/颈枕/耳机/眼罩）挂在它下面才会跟着头动。
-    const head = new THREE.Group();
-    head.position.set(0, 1.16, 0);
-    this.rig.add(head);
-    this.head = head;
-    head.add(new THREE.Mesh(GEO.head, SHARED.skin));
-    const hairMesh = new THREE.Mesh(GEO.hair, hairMat);
-    hairMesh.position.set(0, 0.08, -0.03);
-    hairMesh.scale.set(...HAIR_SCALE[look.hairStyle]);
-    head.add(hairMesh);
-    for (const sx of [-0.11, 0.11]) {
-      const eye = new THREE.Mesh(GEO.eye, SHARED.eye);
-      eye.position.set(sx, 0.01, 0.265);
-      head.add(eye);
-    }
+    this.body = new CharacterBody(defId, color);
+    this.group.add(this.lean);
+    this.lean.add(this.flopG);
+    this.flopG.position.y = PIVOT;
+    this.flopG.add(this.body.root);
+    this.body.root.position.y = -PIVOT;
+    this.sitLift = SEAT_TOP - SEAT_SINK - (this.body.thighHeight - THIGH_R);
+    this.bodyMats = this.body.materials.map((m) => ({ m, opacity: m.opacity, transparent: m.transparent }));
 
     const shadow = new THREE.Mesh(GEO.shadow, SHARED.shadow);
     shadow.rotation.x = -Math.PI / 2;
     shadow.position.y = 0.012;
-    this.rig.add(shadow);
+    this.group.add(shadow);
     this.shadow = shadow;
 
     // 脚下的配色圆环：名字牌重叠时，这是分辨谁是谁的第二条线索。
@@ -268,13 +234,13 @@ export class Actor {
     this.colorRing = new THREE.Mesh(GEO.ring, ringMat);
     this.colorRing.rotation.x = -Math.PI / 2;
     this.colorRing.position.y = 0.02;
-    this.rig.add(this.colorRing);
+    this.group.add(this.colorRing);
 
     this.grabRing = new THREE.Mesh(GEO.grabRing, SHARED.grab);
     this.grabRing.rotation.x = Math.PI / 2;
     this.grabRing.position.y = 0.05;
     this.grabRing.visible = false;
-    this.rig.add(this.grabRing);
+    this.group.add(this.grabRing);
 
     const s = isPlayer ? 1.28 : 1.0;
     const labelMat = new THREE.SpriteMaterial({
@@ -286,30 +252,21 @@ export class Actor {
     this.labelBaseW = s;
     this.labelBaseH = s * 0.3125;
     this.nameLabel.scale.set(this.labelBaseW, this.labelBaseH, 1);
-    this.nameLabel.position.y = (isPlayer ? 1.88 : 1.66) * MODEL_SCALE + 0.22;
+    this.nameLabel.position.y = CHAR_HEIGHT + (isPlayer ? 0.5 : 0.3);
     this.group.add(this.nameLabel);
 
-    // 配件必须在头部节点建好之后挂 —— 放在手臂那一段会拿到 undefined 的 head。
-    // 材质由 buildAccessories 新建，push 进 materials 随 dispose 一起释放。
-    this.materials.push(...buildAccessories(look, {
-      head: this.head, hip: this.rig, handL: this.handL, handR: this.handR
-    }));
-
-    this.collectBodyMaterials([shadow, this.colorRing, this.grabRing]);
-
     if (isPlayer) {
-      // 玩家头顶的跳动箭头：8 个同款人偶里一眼找到自己。
+      // 玩家头顶的跳动箭头：8 个人里一眼找到自己。
       this.arrow = new THREE.Mesh(GEO.arrow, SHARED.playerArrow);
       this.arrow.rotation.x = Math.PI;
-      this.arrow.position.y = 1.5 * MODEL_SCALE + 0.2;
+      this.arrow.position.y = CHAR_HEIGHT + 0.2;
       this.group.add(this.arrow);
     }
   }
 
   /**
    * 推挤动作。
-   * simulation 里 status='pushing' 下一 tick 就被覆盖回 walking/idle，
-   * 所以读 status 根本抓不到推挤 —— 必须由 session 消费 push 事件来触发。
+   * simulation 里推挤是瞬时的，读 status 根本抓不到 —— 必须由 session 消费 push 事件来触发。
    */
   playPush() {
     this.pushTimer = PUSH_DUR;
@@ -327,17 +284,24 @@ export class Actor {
 
   /**
    * 越肩贴身时隐藏玩家自己的名字牌和头顶箭头。
-   * 镜头本身已经回答了"哪个是我"，这两个标记是正交远机位时代的遗留，
-   * 挂在屏幕正中央反而挡视线。
+   * 镜头本身已经回答了"哪个是我"，这两个标记挂在屏幕正中央反而挡视线。
    */
   setSelfMarkersVisible(v: boolean) {
     this.selfMarkers = v;
   }
 
-  update(state: CharacterState, t: number, dt: number, camPos: THREE.Vector3) {
+  /** 把车厢坐标里的点换成"从肩膀出发"的模型空间方向（只看朝向，不管踉跄歪斜）。 */
+  private aimFrom(side: 0 | 1, target: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+    _t.set(target.x - this.group.position.x, target.y - this.group.position.y, target.z - this.group.position.z)
+      .applyAxisAngle(Y_AXIS, -this.group.rotation.y);
+    return out.set(_t.x - (side === 0 ? SHOULDER_X : -SHOULDER_X), _t.y - SHOULDER_Y, _t.z);
+  }
+
+  update(state: CharacterState, t: number, dt: number, camPos: THREE.Vector3, world: ActorWorld) {
     this.group.position.x = state.pos.x;
     this.group.position.z = state.pos.z;
     this.group.rotation.y = state.facing;
+    const p = resetPose(this.pose);
 
     // 被挤下车：演完摔飞再消失。
     if (state.status === 'eliminated') {
@@ -348,167 +312,191 @@ export class Actor {
       this.grabRing.visible = false;
       this.shadow.visible = false;
       this.updateKnockout(this.ko!, dt);
+      this.body.locomotion(0, dt);
+      const tt = this.ko!.t;
+      p.armOut[0] = 2.2 + Math.sin(tt * 11) * 0.4;
+      p.armOut[1] = 2.2 + Math.sin(tt * 13 + 1) * 0.4;
+      p.legFwd[0] = 0.7 + Math.sin(tt * 10) * 0.4;
+      p.legFwd[1] = -0.5 + Math.sin(tt * 12) * 0.4;
+      this.body.applyPose(p);
       return;
     }
     if (this.ko) {
       // 新回合：把摔飞演出的残留变换清干净。
       this.ko = null;
       this.koAlpha = 1;
-      this.rig.rotation.set(0, 0, 0);
+      this.flopG.rotation.set(0, 0, 0);
       this.shadow.visible = true;
     }
 
     this.group.visible = true;
-    this.group.scale.set(1, 1, 1);
     this.nameLabel.visible = this.selfMarkers;
 
     const down = state.status === 'down';
     const carried = state.status === 'carried';
     const thrown = state.status === 'thrown';
     const limp = down || carried || thrown;
-
-    // 坐姿：整体下沉 + 大腿前伸。没有这个的话坐着的人看起来像站在椅子上。
     const sitting = state.status === 'sitting';
-    this.sitBlend += ((sitting ? 1 : 0) - this.sitBlend) * (1 - Math.exp(-12 * dt));
-    this.rig.position.y = SIT_LIFT * this.sitBlend;
-    // 大腿放平搭在座垫上：腿的胶囊绕自身中心转，所以要同时往上、往前挪一点。
-    this.legL.position.y = 0.2 + 0.06 * this.sitBlend;
-    this.legR.position.y = 0.2 + 0.06 * this.sitBlend;
-    this.legL.position.z = 0.16 * MODEL_SCALE * this.sitBlend;
-    this.legR.position.z = 0.16 * MODEL_SCALE * this.sitBlend;
 
-    // 步频跟实际位移速度成正比，慢走时脚才不打滑。
+    // 走跑：步频跟实际位移速度走，慢走时脚才不打滑。
     const moved = Math.hypot(state.pos.x - this.lastX, state.pos.z - this.lastZ);
     this.lastX = state.pos.x;
     this.lastZ = state.pos.z;
-    const speed = dt > 1e-4 ? moved / dt : 0;
-    this.speed01 += (Math.min(1, speed / BALANCE.walkSpeed) - this.speed01) * (1 - Math.exp(-14 * dt));
-    if (!sitting && !limp) this.gait += (speed / STRIDE) * dt * Math.PI * 2;
+    const speed = dt > 1e-4 ? Math.min(12, moved / dt) : 0;
+    this.speed += ((sitting || limp ? 0 : speed) - this.speed) * ease(12, dt);
+    this.body.locomotion(this.speed, dt);
 
-    const walk = sitting || limp ? 0 : this.speed01;
-    let y = sitting ? 0 : Math.abs(Math.sin(this.gait)) * 0.06 * walk + Math.sin(t * 2) * 0.015 * (1 - walk);
-
-    // 抓扶手：把靠近扶手那只手举起来；抓人：双手往前伸。
-    const holdRail = state.hold?.kind === 'rail';
-    const holdChar = state.hold?.kind === 'char';
-    this.armLift += ((holdRail ? 1 : 0) - this.armLift) * (1 - Math.exp(-11 * dt));
-    this.reach += ((holdChar ? 1 : 0) - this.reach) * (1 - Math.exp(-14 * dt));
-    const baseL = -0.2;
-    const baseR = 0.2;
-    let armZL = baseL + (this.liftRight ? 0 : (-2.5 - baseL)) * this.armLift;
-    let armZR = baseR + (this.liftRight ? (2.5 - baseR) : 0) * this.armLift;
-
-    // ---- 站立时的摆腿 / 摆臂 / 推挤 / 踉跄。优先级：坐 > 推挤 > 踉跄 > 走路 ----
-    const swing = Math.sin(this.gait);
-    let legX = sitting ? 1.35 : swing * 0.55 * walk;
-    let legXR = sitting ? 1.35 : -swing * 0.55 * walk;
-    let armXL = -swing * 0.42 * walk;
-    let armXR = swing * 0.42 * walk;
-    let leanX = 0.1 * walk;
+    let y = 0;
+    let leanX = 0;
     let leanZ = 0;
 
+    // ---- 坐下：大腿放平、小腿垂下、双手搭在腿上；整个人下沉并往靠背挪 ----
+    this.sitBlend += ((sitting ? 1 : 0) - this.sitBlend) * ease(12, dt);
+    const sb = this.sitBlend;
+    if (sb > 0.001) {
+      // 膝盖弯得比直角小一点：小腿垂直的话鞋尖会戳进座椅底座。
+      p.legFwd[0] = p.legFwd[1] = 1.45 * sb;
+      p.knee[0] = p.knee[1] = 1.2 * sb;
+      p.armFwd[0] = p.armFwd[1] = 0.45 * sb;
+      p.elbow[0] = p.elbow[1] = 0.8 * sb;
+      p.spineFwd = -0.06 * sb;
+    }
+    this.body.root.position.y = -PIVOT + this.sitLift * sb;
+    this.body.root.position.z = -SIT_BACK * sb;
+
+    // ---- 抓扶手：离扶手近的那只手伸过去握住；抓人：双手伸向对方 ----
+    const holdRail = state.hold?.kind === 'rail';
+    const holdChar = state.hold?.kind === 'char';
+    this.armLift += ((holdRail ? 1 : 0) - this.armLift) * ease(11, dt);
+    this.reach += ((holdChar ? 1 : 0) - this.reach) * ease(14, dt);
+    if (holdRail && state.hold) {
+      const a = world.railAnchor(state.hold.id);
+      if (a) {
+        _t.set(a.x - state.pos.x, 0, a.z - state.pos.z).applyAxisAngle(Y_AXIS, -state.facing);
+        this.railHand = _t.x >= 0 ? 0 : 1;
+        this.aimFrom(this.railHand, a, p.aim[this.railHand]);
+      }
+    }
+    if (this.armLift > 0.001) {
+      p.aimW[this.railHand] = this.armLift;
+      p.straight[this.railHand] = this.armLift;
+    }
+    if (this.reach > 0.001 && state.hold?.kind === 'char') {
+      const v = world.characters[state.hold.id];
+      if (v) {
+        const vLimp = v.status === 'down' || v.status === 'carried';
+        _h.set(v.pos.x, vLimp ? 0.6 : 1.15, v.pos.z);
+        this.aimFrom(0, _h, p.aim[0]);
+        this.aimFrom(1, _h, p.aim[1]);
+        for (const i of [0, 1] as const) {
+          p.aimW[i] = Math.max(p.aimW[i], this.reach);
+          p.straight[i] = Math.max(p.straight[i], this.reach);
+        }
+        p.spineFwd += (vLimp ? 0.35 : 0.15) * this.reach;
+      }
+    }
+
+    // ---- 推挤 / 踉跄。推挤优先 ----
     if (this.pushTimer > 0) {
       this.pushTimer -= dt;
-      // 蓄力(0~0.08) → 爆发(0.08~0.16) → 回弹。
+      // 蓄力(0~0.06，收肘后拉) → 爆发(0.06~0.12，双掌平推出去) → 定住(~0.2) → 收回。
       const e = PUSH_DUR - this.pushTimer;
-      const thrust = e < 0.08
-        ? 0.55 * (e / 0.08)
-        : e < 0.16
-          ? 0.55 - 1.9 * ((e - 0.08) / 0.08)
-          : -1.35 * Math.max(0, 1 - (e - 0.16) / 0.14);
-      armXL = thrust;
-      armXR = thrust;
-      leanX = e < 0.08 ? -0.18 : 0.3;
+      const fwd = e < 0.06
+        ? -0.4 * (e / 0.06)
+        : e < 0.12
+          ? -0.4 + 1.85 * ((e - 0.06) / 0.06)
+          : e < 0.2
+            ? 1.45
+            : 1.45 * Math.max(0, 1 - (e - 0.2) / 0.1);
+      const bend = e < 0.06 ? 1.3 * (e / 0.06) : Math.max(0, 1.3 - 22 * (e - 0.06));
+      for (const i of [0, 1] as const) {
+        p.armFwd[i] = fwd;
+        p.armOut[i] = -0.15;
+        p.straight[i] = 1;
+        p.elbow[i] = bend;
+        p.aimW[i] *= 0.2;
+      }
+      p.spineFwd += e < 0.06 ? -0.15 : 0.3;
     } else if (!sitting && (state.stunTimer > 0 || state.balance < WOBBLE_BELOW)) {
       // 踉跄：被推的硬直，或平衡值偏低时站不稳。往受力的反方向后仰、双臂乱挥、叠一层抖动。
       const k = Math.min(1, Math.max(state.stunTimer / STUN_REF, (WOBBLE_BELOW - state.balance) / WOBBLE_BELOW));
       const localAngle = Math.atan2(state.vel.x, state.vel.z) - state.facing;
-      const sway = Math.sin(t * 7 + state.id) * 0.18 * k;
-      leanX = -0.34 * k * Math.cos(localAngle) + sway;
-      leanZ = 0.34 * k * Math.sin(localAngle) + Math.cos(t * 6 + state.id) * 0.14 * k;
-      armXL = -1.0 * k + Math.sin(t * 13) * 0.4 * k;
-      armXR = -1.0 * k + Math.sin(t * 11 + 1) * 0.4 * k;
-      armZL = Math.min(armZL, -0.2 - 0.9 * k);
-      armZR = Math.max(armZR, 0.2 + 0.9 * k);
-      legX = 0.35 * k;
-      legXR = -0.2 * k;
+      const sway = Math.sin(t * 7 + state.id) * 0.1 * k;
+      leanX = -0.22 * k * Math.cos(localAngle) + sway;
+      leanZ = 0.22 * k * Math.sin(localAngle) + Math.cos(t * 6 + state.id) * 0.08 * k;
+      p.armOut[0] += (1.0 + Math.sin(t * 13) * 0.45) * k;
+      p.armOut[1] += (1.0 + Math.sin(t * 11 + 1) * 0.45) * k;
+      p.armFwd[0] += Math.sin(t * 9) * 0.6 * k;
+      p.armFwd[1] += Math.cos(t * 8) * 0.6 * k;
+      p.spineFwd -= 0.2 * k;
+      p.legFwd[0] += 0.3 * k;
       y += Math.abs(Math.sin(t * 19)) * 0.02 * k;
     }
-    // 抓人时双手平举向前，盖过走路摆臂。
-    if (this.reach > 0.01) {
-      armXL += (-1.45 - armXL) * this.reach;
-      armXR += (-1.45 - armXR) * this.reach;
-      armZL += (-0.12 - armZL) * this.reach;
-      armZR += (0.12 - armZR) * this.reach;
-      leanX += 0.12 * this.reach;
-    }
 
-    // ---- 摔倒 / 被拖 / 被扔：身体软掉。和站姿之间平滑过渡，不会一帧突变 ----
-    this.flop += ((limp ? 1 : 0) - this.flop) * (1 - Math.exp(-(limp ? 16 : 7) * dt));
-    if (this.flop > 0.001) {
-      let fx = -1.5;
-      let fz = 0;
-      let fy = 0.06;
-      let aL = -0.3 + Math.sin(t * 3 + state.id) * 0.15;
-      let aR = 0.2 + Math.cos(t * 3.4 + state.id) * 0.15;
-      let aZL = -1.25;
-      let aZR = 1.25;
-      let lL = 0.25;
-      let lR = -0.15;
+    // ---- 摔倒 / 被拖 / 被扔：身体软掉，绕腰转。和站姿之间平滑过渡，不会一帧突变 ----
+    this.flop += ((limp ? 1 : 0) - this.flop) * ease(limp ? 16 : 7, dt);
+    let fx = 0;
+    let fz = 0;
+    let fy = PIVOT;
+    const f = this.flop;
+    if (f > 0.001) {
+      // 瘫在地上（仰面）：四肢摊开，偶尔抽一下，看得出是"晕了"而不是"死了"。
+      fx = -Math.PI / 2;
+      fy = LIE_Y + Math.max(0, Math.sin(t * 5 + state.id)) * 0.015;
+      fz = Math.sin(t * 2.3 + state.id) * 0.05;
+      let aF = 0.3 + Math.sin(t * 3 + state.id) * 0.15;
+      let aO = 1.1 + Math.cos(t * 3.4 + state.id) * 0.15;
+      let lF = 0.2;
+      let kn = 0.35;
+      let hd = -0.25;
       if (carried) {
-        // 被夹在拖人者身前：横着吊起来，四肢往下耷拉、跟着步子晃。
-        fx = 1.35;
+        // 被夹在拖人者身前：脸朝下横着吊起来，四肢往下耷拉、跟着步子晃。
+        fx = 1.4;
         fz = Math.sin(t * 6 + state.id) * 0.12;
-        fy = 0.5 + Math.sin(t * 9) * 0.04;
-        aL = 1.2 + Math.sin(t * 8) * 0.35;
-        aR = 1.2 + Math.sin(t * 8 + 1.3) * 0.35;
-        aZL = -0.2;
-        aZR = 0.2;
-        lL = 1.1 + Math.sin(t * 7) * 0.3;
-        lR = 1.1 + Math.sin(t * 7 + 1.7) * 0.3;
+        fy = 0.55 + Math.sin(t * 9) * 0.04;
+        aF = 1.35 + Math.sin(t * 8) * 0.3;
+        aO = 0.2;
+        lF = 1.0 + Math.sin(t * 7) * 0.25;
+        kn = 0.5 + Math.sin(t * 7 + 1.7) * 0.2;
+        hd = 0.5;
       } else if (thrown) {
         // 飞在空中：抛物线 + 翻滚 + 四肢乱甩。
         const u = state.airDur > 0 ? Math.min(1, state.airT / state.airDur) : 1;
-        fy = 0.5 + 4 * THROW_ARC * u * (1 - u);
+        fy = 0.6 + 4 * THROW_ARC * u * (1 - u);
         fx = -0.6 + u * 5.5;
         fz = Math.sin(u * 9) * 0.6;
-        aL = -1.6 + Math.sin(t * 17) * 0.5;
-        aR = -1.6 + Math.sin(t * 15 + 1) * 0.5;
-        lL = 0.8 + Math.sin(t * 13) * 0.5;
-        lR = -0.8 + Math.sin(t * 12) * 0.5;
-      } else {
-        // 瘫在地上：身体偶尔抽一下，看得出是"晕了"而不是"死了"。
-        fz = Math.sin(t * 2.3 + state.id) * 0.06;
-        fy += Math.max(0, Math.sin(t * 5 + state.id)) * 0.015;
+        aF = Math.sin(t * 17) * 0.8;
+        aO = 2.2 + Math.sin(t * 15 + 1) * 0.4;
+        lF = 0.8 + Math.sin(t * 13) * 0.6;
+        kn = 0.7;
+        hd = 0.3;
       }
-      const f = this.flop;
-      leanX += (fx - leanX) * f;
-      leanZ += (fz - leanZ) * f;
-      y += (fy - y) * f;
-      armXL += (aL - armXL) * f;
-      armXR += (aR - armXR) * f;
-      armZL += (aZL - armZL) * f;
-      armZR += (aZR - armZR) * f;
-      legX += (lL - legX) * f;
-      legXR += (lR - legXR) * f;
+      for (const i of [0, 1] as const) {
+        p.armFwd[i] += (aF - p.armFwd[i]) * f;
+        p.armOut[i] += (aO - p.armOut[i]) * f;
+        p.elbow[i] *= 1 - f;
+        p.aimW[i] *= 1 - f;
+        p.straight[i] += (0.7 - p.straight[i]) * f;
+        p.legFwd[i] += ((i === 0 ? lF : lF * 0.6) - p.legFwd[i]) * f;
+        p.knee[i] += (kn - p.knee[i]) * f;
+      }
+      p.headFwd += (hd - p.headFwd) * f;
     }
+    this.flopG.rotation.x = fx * f;
+    this.flopG.rotation.z = fz * f;
+    this.flopG.position.y = PIVOT + (fy - PIVOT) * f;
+    this.body.applyPose(p);
 
     this.group.position.y = y;
-    this.legL.rotation.x = legX;
-    this.legR.rotation.x = legXR;
-    this.armL.rotation.x = armXL;
-    this.armR.rotation.x = armXR;
-    this.armL.rotation.z = armZL;
-    this.armR.rotation.z = armZR;
-    this.rig.rotation.x = leanX;
-    this.rig.rotation.z = leanZ;
+    this.lean.rotation.x = leanX * (1 - f);
+    this.lean.rotation.z = leanZ * (1 - f);
 
     this.grabRing.visible = holdRail;
     this.colorRing.visible = state.alive && !carried && !thrown;
     this.shadow.visible = !thrown;
     if (this.arrow) {
       this.arrow.visible = this.selfMarkers;
-      this.arrow.position.y = 1.5 * MODEL_SCALE + 0.2 + Math.sin(t * 5) * 0.09;
+      this.arrow.position.y = CHAR_HEIGHT + 0.2 + Math.sin(t * 5) * 0.09;
     }
 
     // 透视下 Sprite 的世界尺寸会近大远小：做"部分补偿"，夹在 0.6~1.7 之间，
@@ -528,8 +516,7 @@ export class Actor {
   /**
    * 摔下车：抛物线飞出车门，落在真实地面上弹一下，然后躺平淡出。
    *
-   * 以前落点写死在 y=0（车厢地板），车外的人行道比它低 0.82，于是人悬在半空，
-   * 再整个沉进地里"退场"。现在地面高度由 SceneryView 提供；车在开的时候，
+   * 落点高度由 SceneryView 提供（车外的人行道比车厢地板低 0.82）；车在开的时候，
    * 落地的人会被地面摩擦带着往车尾方向滚远（车厢坐标系里地面在往 -z 走）。
    */
   private updateKnockout(k: NonNullable<Actor['ko']>, dt: number) {
@@ -545,6 +532,7 @@ export class Actor {
     const zAir = k.z0 + k.dz * travel;
     const floor = g ? g.heightAt(x, zAir + k.slide) : 0;
     let y: number;
+    this.lean.rotation.set(0, 0, 0);
     if (k.landT < 0) {
       y = 3.4 * tt - 5.5 * tt * tt;
       // 过了抛物线顶点、又低于地面，就算落地。
@@ -553,68 +541,43 @@ export class Actor {
         y = floor;
       }
       // 翻滚 + 四肢摊开：ragdoll 的最廉价替代。
-      this.rig.rotation.z = tt * 8.2;
-      this.rig.rotation.x = Math.sin(tt * 9) * 0.5;
+      this.flopG.rotation.z = tt * 8.2;
+      this.flopG.rotation.x = Math.sin(tt * 9) * 0.5;
+      this.flopG.position.y = PIVOT;
     } else {
       const tl = tt - k.landT;
       // 离开车厢后，地面摩擦把他的相对速度拉向"地面速度"：车在开，人就被甩在后面。
       const drift = g ? g.driftZ : 0;
-      k.vz += (drift - k.vz) * (1 - Math.exp(-4 * dt));
+      k.vz += (drift - k.vz) * ease(4, dt);
       k.slide += k.vz * dt;
       y = floor + Math.max(0, 1.3 * tl - 7 * tl * tl);
       // 躺平；滑得越快滚得越快。
-      this.rig.rotation.x = -1.4;
-      this.rig.rotation.z += (Math.abs(k.vz) / 0.45) * dt;
+      this.flopG.rotation.x = -Math.PI / 2;
+      this.flopG.rotation.z += (Math.abs(k.vz) / 0.45) * dt;
+      this.flopG.position.y = LIE_Y;
       const moving = Math.abs(drift) > 1.5;
       const rest = moving ? KO_REST_MOVING : KO_REST_STILL;
       this.koAlpha = Math.max(0, 1 - Math.max(0, tl - rest) / KO_FADE);
       if (this.koAlpha <= 0 || tt > KO_MAX) k.done = true;
     }
     this.group.position.set(x, y, zAir + k.slide);
-    this.armL.rotation.x = -1.6 + Math.sin(tt * 11) * 0.3;
-    this.armR.rotation.x = -1.6 + Math.sin(tt * 13 + 1) * 0.3;
-    this.legL.rotation.x = 0.7 + Math.sin(tt * 10) * 0.4;
-    this.legR.rotation.x = -0.7 + Math.sin(tt * 12) * 0.4;
     this.group.visible = !k.done;
   }
 
-  /**
-   * 收集身体上的所有材质，共享材质就地换成这个人自己的一份。
-   * 按网格遍历而不是点名，换成正式角色模型后这段不用改。
-   */
-  private collectBodyMaterials(markers: THREE.Object3D[]) {
-    const skip = new Set<THREE.Object3D>(markers);
-    const own = new Map<THREE.Material, THREE.Material>();
-    const shared = new Set<THREE.Material>(Object.values(SHARED));
-    this.rig.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh || skip.has(mesh)) return;
-      const src = mesh.material as THREE.Material;
-      let m = own.get(src);
-      if (!m) {
-        m = shared.has(src) ? src.clone() : src;
-        if (m !== src) this.materials.push(m);
-        own.set(src, m);
-      }
-      mesh.material = m;
-    });
-    this.bodyMats = [...own.values()];
-  }
-
-  /** 挡视线淡出：只在淡出过程中切透明，平时保持不透明，免得多一轮排序。 */
+  /** 挡视线淡出：只在淡出过程中切透明，平时恢复每件材质本来的设定，免得多一轮排序。 */
   applyOcclusion(dt: number) {
     const target = (this.occluding ? OCCLUDER_ALPHA : 1) * this.koAlpha;
     if (Math.abs(this.bodyAlpha - target) < 1e-3) {
       if (this.bodyAlpha === target) return;
       this.bodyAlpha = target;
     } else {
-      this.bodyAlpha += (target - this.bodyAlpha) * (1 - Math.exp(-10 * dt));
+      this.bodyAlpha += (target - this.bodyAlpha) * ease(10, dt);
     }
     const solid = this.bodyAlpha > 0.995;
-    for (const m of this.bodyMats) {
+    for (const b of this.bodyMats) {
       // 必须走 setMaterialTransparent：只改 transparent 标记，编译过的不透明着色器仍然输出实心。
-      setMaterialTransparent(m, !solid);
-      m.opacity = solid ? 1 : this.bodyAlpha;
+      setMaterialTransparent(b.m, solid ? b.transparent : true);
+      b.m.opacity = solid ? b.opacity : b.opacity * this.bodyAlpha;
     }
   }
 
@@ -626,29 +589,18 @@ export class Actor {
   /** 名字牌淡入淡出：去重和近距淡出都走这里，避免名字牌一帧闪现一帧消失。 */
   applyLabelAlpha(dt: number) {
     const target = this.labelTarget * this.labelNear;
-    this.labelAlpha += (target - this.labelAlpha) * (1 - Math.exp(-12 * dt));
+    this.labelAlpha += (target - this.labelAlpha) * ease(12, dt);
     this.labelMat.opacity = this.labelAlpha;
     if (this.labelAlpha < 0.02) this.nameLabel.visible = false;
   }
 
-  /**
-   * 手掌的世界坐标，用来画到扶手的连接线。
-   * towards 给定时挑靠近它的那只手；以前这里返回的是身体中心 + 固定高度，
-   * 越肩贴近之后那条黄线是从肚子里穿出来的。
-   */
-  handPosition(out: THREE.Vector3, towards?: THREE.Vector3): THREE.Vector3 {
-    if (towards) {
-      const f = this.group.rotation.y;
-      // 角色的局部 +x 在世界里的方向（rotation.y = f 时）。
-      const rx = Math.cos(f);
-      const rz = -Math.sin(f);
-      const dot = (towards.x - this.group.position.x) * rx + (towards.z - this.group.position.z) * rz;
-      this.liftRight = dot >= 0;
-    }
-    return (this.liftRight ? this.handR : this.handL).getWorldPosition(out);
+  /** 抓扶手那只手的世界坐标，用来画到扶手的连接线。 */
+  handPosition(out: THREE.Vector3): THREE.Vector3 {
+    return this.body.hand(this.railHand).getWorldPosition(out);
   }
 
   dispose() {
+    this.body.dispose();
     for (const m of this.materials) m.dispose();
   }
 }
@@ -663,7 +615,7 @@ function shiftInto(c: number, h: number, lo: number, hi: number): number {
   return 0;
 }
 
-/** 管理全部角色人偶。 */
+/** 管理全部角色。 */
 export class ActorManager {
   private actors = new Map<number, Actor>();
   private group = new THREE.Group();
@@ -701,12 +653,20 @@ export class ActorManager {
     this.ground = g;
   }
 
+  private railAnchorFn: (id: number) => THREE.Vector3 | null = () => null;
+
+  /** 扶手握把在车厢坐标里的位置（抓扶手时手伸过去）。由 BusView 提供。 */
+  setRailAnchor(fn: (id: number) => THREE.Vector3 | null) {
+    this.railAnchorFn = fn;
+  }
+
   update(characters: CharacterState[], t: number, dt: number, camPos: THREE.Vector3) {
+    const world: ActorWorld = { characters, railAnchor: this.railAnchorFn };
     for (const c of characters) {
       const a = this.actors.get(c.id);
       if (!a) continue;
       a.ground = this.ground;
-      a.update(c, t, dt, camPos);
+      a.update(c, t, dt, camPos, world);
     }
     this.declutterLabels(camPos);
     this.markOccluders(characters, camPos);

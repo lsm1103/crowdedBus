@@ -14,7 +14,7 @@ export const CHARACTERS: CharacterDef[] = [
   { id: 'aqiang', name: '健身哥阿强', color: '#f59e0b' },
   { id: 'lanjie', name: '买菜阿姨兰姐', color: '#ef4444' },
   { id: 'ayuan', name: '旅行者阿远', color: '#8b5cf6' },
-  { id: 'xiaomai', name: '主播小麦', color: '#ec4899' },
+  { id: 'ajia', name: '时尚姐阿娇', color: '#ec4899' },
   { id: 'amo', name: '社恐阿默', color: '#64748b' },
   { id: 'laozhou', name: '睡神老周', color: '#84cc16' }
 ];

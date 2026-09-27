@@ -1,48 +1,62 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { asset } from '../core/assets';
+import { CHARACTERS } from '../config/characters';
 
 /**
- * Blender 产出的模型（scripts/blender/build_models.py → public/models/*.glb）。
+ * Blender 产出的模型。
+ * - 车身、街景：scripts/blender/build_models.py → public/models/*.glb；
+ * - 8 名角色：在角色工程里制作，npm run chars:sync 压缩后放进 public/models/characters/。
  *
- * 在加载页一次性预载，之后 buildBus() / SceneryView 同步取用 ——
+ * 在加载页一次性预载，之后 buildBus() / SceneryView / 角色同步取用 ——
  * 这样 Game 的构造流程和以前一样是同步的，不用把 async 传染到 session。
  */
 const FILES = { bus: 'models/bus.glb', city: 'models/city.glb' } as const;
 export type ModelName = keyof typeof FILES;
 
+/** 角色资产：场景（带骨骼）+ 动作。每个人上场时各自克隆一份。 */
+export interface CharacterAsset {
+  scene: THREE.Group;
+  animations: THREE.AnimationClip[];
+}
+
 const cache = new Map<ModelName, THREE.Group>();
+const characters = new Map<string, CharacterAsset>();
 
 export function loadModels(onProgress?: (v: number) => void): Promise<void> {
   const loader = new GLTFLoader();
   loader.setMeshoptDecoder(MeshoptDecoder);
-  const names = Object.keys(FILES) as ModelName[];
-  const progress = new Map<ModelName, number>();
-  const report = () => {
-    let sum = 0;
-    for (const n of names) sum += progress.get(n) ?? 0;
-    onProgress?.(sum / names.length);
-  };
-  return Promise.all(names.map((name) => new Promise<void>((resolve) => {
+  const jobs: { url: string; label: string; done: (gltf: GLTF) => void }[] = [
+    ...(Object.keys(FILES) as ModelName[]).map((name) => ({
+      url: FILES[name], label: name, done: (gltf: GLTF) => void cache.set(name, gltf.scene)
+    })),
+    ...CHARACTERS.map((c) => ({
+      url: `models/characters/${c.id}.glb`, label: c.id,
+      done: (gltf: GLTF) => void characters.set(c.id, { scene: gltf.scene, animations: gltf.animations })
+    }))
+  ];
+  const progress = new Array<number>(jobs.length).fill(0);
+  const report = () => onProgress?.(progress.reduce((a, b) => a + b, 0) / jobs.length);
+  return Promise.all(jobs.map((job, i) => new Promise<void>((resolve) => {
     loader.load(
-      asset(FILES[name]),
+      asset(job.url),
       (gltf) => {
-        cache.set(name, gltf.scene);
-        progress.set(name, 1);
+        job.done(gltf);
+        progress[i] = 1;
         report();
         resolve();
       },
       (e) => {
         if (e.lengthComputable) {
-          progress.set(name, e.loaded / e.total);
+          progress[i] = e.loaded / e.total;
           report();
         }
       },
       (err) => {
-        // 失败不阻塞进游戏：车/街景缺了会在控制台报错，但不会白屏卡死在加载页。
-        console.error(`[models] ${name} 加载失败`, err);
-        progress.set(name, 1);
+        // 失败不阻塞进游戏：缺了的模型会在控制台报错（角色退回成占位胶囊），但不会白屏卡死在加载页。
+        console.error(`[models] ${job.label} 加载失败`, err);
+        progress[i] = 1;
         report();
         resolve();
       }
@@ -52,6 +66,10 @@ export function loadModels(onProgress?: (v: number) => void): Promise<void> {
 
 export function getModel(name: ModelName): THREE.Group | null {
   return cache.get(name) ?? null;
+}
+
+export function getCharacterAsset(id: string): CharacterAsset | null {
+  return characters.get(id) ?? null;
 }
 
 /**
