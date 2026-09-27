@@ -2,13 +2,23 @@ import { V2, v2Len, v2Norm, screenToWorld, type Vec2 } from './math';
 import { CAMERA_YAW_DEFAULT } from '../config/view';
 import { toStageDelta, toStageLocal } from './orientation';
 
-export type Button = 'dash' | 'push' | 'interact' | 'skill' | 'emote';
+/** 三个动作键（docs/08 第 3.1 节）：抓（按住）、推 / 扔、冲。 */
+export type Button = 'grab' | 'push' | 'dash';
 
-/** 每帧输入：move 为归一化的**世界**方向，buttons 为这一帧“按下”的动作（边沿触发）。 */
+/**
+ * 每帧输入。
+ * - move：归一化的**世界**方向；
+ * - pressed：这一帧"按下"的键（边沿触发）；
+ * - held：这一帧仍按着的键（"抓"是按住生效、松手放开）。
+ */
 export interface InputFrame {
   move: Vec2;
-  buttons: Set<Button>;
+  pressed: Set<Button>;
+  held: Set<Button>;
 }
+
+/** 键盘键位：E/F 抓（按住），J/K 推，空格 冲。 */
+const KEYS: Record<Button, string[]> = { grab: ['e', 'f'], push: ['j', 'k'], dash: [' '] };
 
 const DEADZONE = 0.16;
 
@@ -19,6 +29,18 @@ const DEADZONE = 0.16;
 export class InputManager {
   private move = V2();
   private pressed = new Set<Button>();
+  /** 触屏按钮当前按着的集合（键盘的按住状态从 _keys 里算）。 */
+  private touchHeld = new Set<Button>();
+  /**
+   * 触屏的"抓"是锁定式：点一下锁住（相当于一直按着），再点一下松开。
+   * 规则层的"抓"是按住生效，但手机上左手推摇杆、右手要腾出来点"扔"，
+   * 不可能一直按着抓键 —— 两个拇指做不到"抓着人、走到门口、再按扔"。
+   * 手里空了（没抓到东西 / 扔出去了 / 被挣脱）由 syncGrab() 自动解锁。
+   */
+  private grabLatch = false;
+  private latchIdle = 0;
+  /** 同一次点按会先后触发 pointerdown 和 touchstart，切换式按键要去重，否则连切两次等于没按。 */
+  private lastPress = new Map<Button, number>();
   private joystickId = -1;
   private radius = 0;
   private originX = 0;
@@ -192,13 +214,32 @@ export class InputManager {
       els.push(el);
       const press = (e: Event) => {
         e.preventDefault();
-        // 冷却中也照样上报：是否执行、要不要提示"冷却中"、差一点就缓冲，
-        // 都由模拟层决定。以前这里直接丢掉，触屏上"技能冷却中"永远不会出现，
-        // 冷却最后一瞬间按的键也被吞。
-        this.pressed.add(key);
+        const now = performance.now();
+        if (now - (this.lastPress.get(key) ?? -1e9) < 80) return;
+        this.lastPress.set(key, now);
         el.classList.add('active');
+        if (key === 'grab') {
+          if (this.grabLatch) {
+            this.grabLatch = false; // 再点一下：松手
+          } else {
+            this.grabLatch = true;
+            this.latchIdle = 0;
+            this.pressed.add('grab');
+          }
+          return;
+        }
+        // 冷却中也照样上报：是否执行、要不要提示"冷却中"、差一点就缓冲，都由模拟层决定。
+        this.pressed.add(key);
+        this.touchHeld.add(key);
+        // 捕获指针：推、冲按住时手指在按钮上稍微滑出一点不能算松手。
+        if (e instanceof PointerEvent) {
+          try { el.setPointerCapture(e.pointerId); } catch { /* noop */ }
+        }
       };
-      const release = () => el.classList.remove('active');
+      const release = () => {
+        this.touchHeld.delete(key);
+        el.classList.remove('active');
+      };
       el.addEventListener('pointerdown', press);
       el.addEventListener('touchstart', press, { passive: false });
       el.addEventListener('pointerup', release);
@@ -206,21 +247,20 @@ export class InputManager {
       el.addEventListener('pointerleave', release);
       el.addEventListener('touchend', release);
     }
-    this.releaseButtons = () => els.forEach((el) => el.classList.remove('active'));
+    this.releaseButtons = () => {
+      this.touchHeld.clear();
+      this.grabLatch = false;
+      els.forEach((el) => el.classList.remove('active'));
+    };
   }
 
   private bindKeyboard() {
     window.addEventListener('keydown', (e) => {
       const k = e.key.toLowerCase();
       this._keys.add(k);
-      // 动作键只认第一次按下：交互键是"切换"，长按时系统自动重复会让
-      // 抓住/松手每帧翻转，最后是抓着还是松开全凭运气。
+      // 按下边沿只认第一次：长按时系统的自动重复不能算成连按。按住状态在 takeFrame 里从 _keys 算。
       if (e.repeat) return;
-      if (k === ' ') this.pressed.add('dash');
-      else if (k === 'j' || k === 'k') this.pressed.add('push');
-      else if (k === 'e' || k === 'f') this.pressed.add('interact');
-      else if (k === 'q') this.pressed.add('skill');
-      else if (k === 'x') this.pressed.add('emote');
+      for (const b of Object.keys(KEYS) as Button[]) if (KEYS[b].includes(k)) this.pressed.add(b);
     });
     window.addEventListener('keyup', (e) => {
       this._keys.delete(e.key.toLowerCase());
@@ -243,6 +283,21 @@ export class InputManager {
     this.lookEnded = true;
   }
 
+  /**
+   * 每个模拟步由会话层调用：触屏锁住了"抓"、但手里空了超过 0.3 秒，就自动解锁。
+   * 否则扔完人、或者对方挣脱之后，抓键还锁着，下一次点它反而变成"松手"。
+   * 留 0.3 秒是为了让"锁住后走到扶手/人旁边自动抓上"还能生效。
+   */
+  syncGrab(holding: boolean, dt: number) {
+    if (!this.grabLatch) return;
+    if (holding) {
+      this.latchIdle = 0;
+      return;
+    }
+    this.latchIdle += dt;
+    if (this.latchIdle > 0.3) this.grabLatch = false;
+  }
+
   /** 取走本帧输入并清空边沿。 */
   takeFrame(): InputFrame {
     let move = this.move;
@@ -256,7 +311,10 @@ export class InputManager {
       if (Math.hypot(x, z) > 0.01) move = v2Norm(screenToWorld(x, z, this.basisYaw));
     }
     if (v2Len(move) > 1) move = v2Norm(move);
-    const frame: InputFrame = { move, buttons: this.pressed };
+    const held = new Set<Button>(this.touchHeld);
+    if (this.grabLatch) held.add('grab');
+    for (const b of Object.keys(KEYS) as Button[]) if (KEYS[b].some((k) => this._keys.has(k))) held.add(b);
+    const frame: InputFrame = { move, pressed: this.pressed, held };
     this.pressed = new Set();
     return frame;
   }

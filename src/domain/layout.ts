@@ -23,30 +23,26 @@ export interface Handrail {
 }
 
 /**
- * 座位。
+ * 座位（docs/08 第 6.3 节）。
  *
- * 以前 seats 只是一堆碰撞矩形，角色被 resolveCircleRect 直接推开，根本坐不上去 ——
- * slogan 写着「抢位置」，而抢位置是假的。现在座面可通行、只有靠背挡人，
- * 座位本身成为可占据的稀缺产出源。
+ * 坐着的人最稳：免疫机关和推挤，但不能出手；别人抓住他不放 1 秒就能把他拽起来。
+ * 座垫对"没坐在这个座位上的人"是实心的，靠背始终参与碰撞。
  */
 export interface Seat {
   id: number;
-  kind: 'normal' | 'priority';
-  /** 坐上去之后角色被钉在这个点。 */
+  /** single = 单人座；bench = 后排长椅的一格（建模时连成一条）。 */
+  kind: 'single' | 'bench';
+  /** 坐上去之后角色被钉在这个点（座垫中心）。 */
   x: number;
   z: number;
-  /** 坐着时的朝向（面朝过道）。 */
+  /** 坐着时的朝向（弧度，0 = +z 车头方向，π/2 = +x 车门一侧）。 */
   facing: number;
-  /** 座位占地（旧字段，导出给建模脚本用，碰撞不再读它）。 */
-  rect: Rect;
-  /** 靠背：参与碰撞。 */
-  backRect: Rect;
-  /**
-   * 座垫：对"没坐在这个座位上的人"是实心的。
-   * 范围和车模里的座垫视觉一致（x∈[-2.32,-1.42]、z∈[z-0.49, z+0.49]，顶面 y=0.46）。
-   * 以前座面可以直接穿过去，站着的人会和坐着的人叠在同一张椅子上。
-   */
+  /** 朝向的单位向量：站着的人从这一侧接近、起身时从这一侧落脚。 */
+  front: Vec2;
+  /** 座垫：对没坐在上面的人是实心的；范围与车模一致。 */
   cushion: Rect;
+  /** 靠背：在朝向的反侧，始终参与碰撞。 */
+  backRect: Rect;
 }
 
 export type ObstacleKind = 'luggage' | 'stroller' | 'bin' | 'wheelwell';
@@ -84,24 +80,24 @@ export interface BusLayout {
  */
 export const INTERIOR: Rect = { minX: -2.35, maxX: 2.35, minZ: -6.2, maxZ: 6.2 };
 
-/** 座位沿远侧车壁排布；靠背贴墙、座面朝过道。 */
-const SEAT_HALF_LEN = 0.55;
-/** 座垫碰撞范围（与车模视觉一致）。 */
-const CUSHION_MIN_X = -2.32;
-const CUSHION_MAX_X = -1.42;
-const CUSHION_HALF_LEN = 0.49;
-function makeSeats(defs: { id: number; kind: Seat['kind']; z: number }[]): Seat[] {
-  return defs.map((d) => ({
-    id: d.id,
-    kind: d.kind,
-    x: -1.78,
-    z: d.z,
-    facing: Math.PI / 2, // 面朝 +x（过道）
-    rect: { minX: -2.35, maxX: -1.4, minZ: d.z - SEAT_HALF_LEN, maxZ: d.z + SEAT_HALF_LEN },
-    backRect: { minX: -2.35, maxX: -2.12, minZ: d.z - SEAT_HALF_LEN, maxZ: d.z + SEAT_HALF_LEN },
-    cushion: { minX: CUSHION_MIN_X, maxX: CUSHION_MAX_X, minZ: d.z - CUSHION_HALF_LEN, maxZ: d.z + CUSHION_HALF_LEN }
-  }));
+/** 靠背厚度。 */
+const BACK_T = 0.18;
+
+/** 按座垫范围和朝向生成座位；靠背贴在朝向的反侧。 */
+function seat(id: number, kind: Seat['kind'], cushion: Rect, dir: '+z' | '+x'): Seat {
+  const x = (cushion.minX + cushion.maxX) / 2;
+  const z = (cushion.minZ + cushion.maxZ) / 2;
+  const backRect: Rect = dir === '+z'
+    ? { minX: cushion.minX, maxX: cushion.maxX, minZ: cushion.minZ - BACK_T, maxZ: cushion.minZ }
+    : { minX: cushion.minX - BACK_T, maxX: cushion.minX, minZ: cushion.minZ, maxZ: cushion.maxZ };
+  return {
+    id, kind, x, z,
+    facing: dir === '+z' ? 0 : Math.PI / 2,
+    front: dir === '+z' ? { x: 0, z: 1 } : { x: 1, z: 0 },
+    cushion, backRect
+  };
 }
+
 export const PLATFORM: Rect = { minX: 2.35, maxX: 6.0, minZ: -5.2, maxZ: -3.4 };
 
 export const LAYOUT: BusLayout = {
@@ -111,14 +107,16 @@ export const LAYOUT: BusLayout = {
     { id: 'front', zMin: 3.4, zMax: 5.2, open: false },
     { id: 'back', zMin: -5.2, zMax: -3.4, open: true }
   ],
-  // 4 个座位 8 个人：一半人没座，够抢；再少的话落选者会直接放弃。
-  // 爱心专座离后门最近，分更高但也最危险 —— 给"敢不敢坐门边"一个明确的赌注。
-  seats: makeSeats([
-    { id: 0, kind: 'normal', z: 2.45 },
-    { id: 1, kind: 'normal', z: 1.15 },
-    { id: 2, kind: 'normal', z: -1.15 },
-    { id: 3, kind: 'priority', z: -3.7 }
-  ]),
+  // 按国内城市公交的布局：前部左侧两个朝前的单人座，中部左侧一个朝过道的单人座，
+  // 后排三连长椅。中部是开阔的站立区（主战场），路人乘客也会来抢座。
+  seats: [
+    seat(0, 'single', { minX: -2.30, maxX: -1.40, minZ: 4.50, maxZ: 5.40 }, '+z'),
+    seat(1, 'single', { minX: -2.30, maxX: -1.40, minZ: 3.25, maxZ: 4.15 }, '+z'),
+    seat(2, 'single', { minX: -2.32, maxX: -1.42, minZ: 0.20, maxZ: 1.20 }, '+x'),
+    seat(3, 'bench', { minX: -2.30, maxX: -1.40, minZ: -5.98, maxZ: -5.10 }, '+z'),
+    seat(4, 'bench', { minX: -1.40, maxX: -0.50, minZ: -5.98, maxZ: -5.10 }, '+z'),
+    seat(5, 'bench', { minX: -0.50, maxX: 0.40, minZ: -5.98, maxZ: -5.10 }, '+z')
+  ],
   // 只有 6 根扶手、8 个人：抓扶手是稀缺资源，得抢。
   handrails: [
     { id: 0, x: 0, z: -4.2 },
@@ -128,22 +126,11 @@ export const LAYOUT: BusLayout = {
     { id: 4, x: 0, z: 4.2 },
     { id: 5, x: 1.45, z: 0 }
   ],
+  // 车厢里的"障碍物"改由路人乘客承担，固定障碍只留前门旁的投币箱。
   obstacles: [
-    // 门那一侧堆着行李和轮拱，被推向车门时不好躲。
-    { id: 0, kind: 'luggage', rect: { minX: 1.05, maxX: 1.95, minZ: -1.75, maxZ: -0.85 }, height: 0.78 },
-    { id: 1, kind: 'wheelwell', rect: { minX: 1.85, maxX: 2.35, minZ: 0.7, maxZ: 1.9 }, height: 0.52 },
-    // 婴儿车贴远侧墙、投币箱靠前门：立杆有了碰撞之后，原位置让 4 号杆和婴儿车只剩 0.3、
-    // 3 号杆和投币箱只剩 0.94，去前门和车头只剩一条 1.084 的斜缝（角色直径 1.0），每局都堵死。
-    // 现在过道里杆与障碍物的缝都 ≥ 1.16：4 号杆—婴儿车 1.30、4 号杆—投币箱 1.19、3 号杆—投币箱 1.16。
-    { id: 2, kind: 'stroller', rect: { minX: -2.25, maxX: -1.35, minZ: 4.2, maxZ: 5.1 }, height: 0.95 },
-    { id: 3, kind: 'bin', rect: { minX: 0.95, maxX: 1.55, minZ: 2.85, maxZ: 3.4 }, height: 0.86 }
+    { id: 0, kind: 'bin', rect: { minX: 0.95, maxX: 1.55, minZ: 2.85, maxZ: 3.4 }, height: 0.86 }
   ],
-  fillers: [
-    // 5 号扶手 (1.45, 0) 背后那块地：杆到行李 0.8、到轮拱 0.76、到车壁 0.85，
-    // 都小于角色直径 1.0。算过：这块区域里不存在合法站位，只会把人卡住。
-    // 填充体从杆心往车壁方向铺满，杆本身西半边露在外面，和填充体连成一整块。
-    { minX: 1.45, maxX: 2.35, minZ: -0.85, maxZ: 0.7 }
-  ],
+  fillers: [],
   /**
    * 站台出生点，**按离后门由近到远排列**。
    * 玩家固定是 0 号，之前这个数组是由远到近，等于玩家每局都从最远的位置起步、
@@ -200,8 +187,86 @@ export function distToRect(p: Vec2, r: Rect): number {
 
 /**
  * 站着的人在座垫前沿外的站位（坐下前的接近点、起身后的落脚点）。
- * 角色半径另算，这里只给出座垫前沿中点外侧 margin 处。
+ * 沿座位朝向，从座垫前沿再往外 radius + margin。
  */
 export function seatFrontPoint(seat: Seat, radius: number, margin = 0.03): Vec2 {
-  return { x: seat.cushion.maxX + radius + margin, z: seat.z };
+  const c = seat.cushion;
+  const halfDepth = seat.front.x !== 0 ? (c.maxX - c.minX) / 2 : (c.maxZ - c.minZ) / 2;
+  const d = halfDepth + radius + margin;
+  return { x: seat.x + seat.front.x * d, z: seat.z + seat.front.z * d };
 }
+
+// ---------------------------------------------------------------------------
+// 以下为规则层新增的派生点位（只读 LAYOUT，不改任何已有坐标）。
+// ---------------------------------------------------------------------------
+
+/** 门洞中线的 z。 */
+export function doorCenterZ(d: Door): number {
+  return (d.zMin + d.zMax) / 2;
+}
+
+/**
+ * 半径 radius 的站着的人能不能站在 p：在车厢内、不压座垫/靠背/障碍物/填充体/立杆。
+ * 车厢边界按 INTERIOR 算（与寻路网格同一口径，比车墙碰撞更保守）。
+ */
+export function standable(p: Vec2, radius: number, margin = 0.02): boolean {
+  const r = INTERIOR;
+  const need = radius + margin;
+  if (p.x - r.minX < need || r.maxX - p.x < need || p.z - r.minZ < need || r.maxZ - p.z < need) return false;
+  for (const s of LAYOUT.seats) {
+    if (distToRect(p, s.cushion) < need || distToRect(p, s.backRect) < need) return false;
+  }
+  for (const o of LAYOUT.obstacles) if (distToRect(p, o.rect) < need) return false;
+  for (const f of LAYOUT.fillers) if (distToRect(p, f) < need) return false;
+  for (const h of LAYOUT.handrails) {
+    if (Math.hypot(p.x - h.x, p.z - h.z) < need + POLE_RADIUS) return false;
+  }
+  return true;
+}
+
+/**
+ * 坐下前的接近点 / 起身后的落脚点。
+ *
+ * 首选 seatFrontPoint（沿朝向正前方）。但新布局里有三个座位的正前方站不了人：
+ * - 0 号：座垫前沿到车头只剩 0.8 格，比角色直径 1.0 窄；
+ * - 1 号：正前方是 0 号座的靠背和座垫（前后排腿部空间只有 0.17）；
+ * - 5 号：正前方压在 0 号立杆上。
+ * 这时依次试：从过道一侧（+x）贴着座垫接近、沿座垫前沿左右挪半个身位。
+ * 返回的点保证 standable，且到座垫边缘 ≤ SEAT.reachEdge（贴上去就能坐）。
+ */
+export function seatApproachPoint(seat: Seat, radius: number): Vec2 {
+  const c = seat.cushion;
+  const margin = 0.03;
+  const cands: Vec2[] = [seatFrontPoint(seat, radius, margin)];
+  if (seat.front.z !== 0) {
+    // 朝车头的座位：过道在 +x 一侧。
+    cands.push({ x: c.maxX + radius + margin, z: seat.z });
+    const f = cands[0];
+    cands.push({ x: f.x + 0.45, z: f.z }, { x: f.x - 0.45, z: f.z });
+  } else {
+    // 朝过道的座位：两侧是 ±z。
+    cands.push({ x: seat.x, z: c.maxZ + radius + margin }, { x: seat.x, z: c.minZ - radius - margin });
+    const f = cands[0];
+    cands.push({ x: f.x, z: f.z + 0.45 }, { x: f.x, z: f.z - 0.45 });
+  }
+  for (const p of cands) if (standable(p, radius, -0.01)) return p;
+  return cands[0];
+}
+
+/**
+ * 路人乘客站着的位置（站立区）。
+ * 彼此 ≥ 1.0、离立杆/座位/车壁留足余量、离所有座位的接近点 ≥ 1.0（不堵座位），
+ * 不站在两扇门的正前方（门口是主战场，留给玩家打）。
+ */
+export const NPC_SPOTS: readonly Vec2[] = [
+  { x: -1.35, z: -3.3 },
+  { x: -1.4, z: -1.6 },
+  { x: 1.55, z: -2.3 },
+  { x: 0.85, z: -1.05 },
+  { x: 1.6, z: 1.25 },
+  { x: -1.45, z: 1.95 },
+  { x: -0.6, z: 2.6 },
+  { x: 0.9, z: 5.6 },
+  { x: -0.95, z: -0.55 },
+  { x: 1.65, z: 2.35 }
+];

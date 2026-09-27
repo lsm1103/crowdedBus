@@ -2,7 +2,7 @@ import { CHARACTERS } from '../config/characters';
 import { rolePortrait } from '../core/assets';
 
 /**
- * 结算战绩图。
+ * 整场战绩图。
  *
  * 三个微信里必踩的坑，设计阶段就得处理：
  *
@@ -23,25 +23,55 @@ import { rolePortrait } from '../core/assets';
 const W = 1080;
 const H = 1920;
 
+/** 一整场（先赢 N 回合拿下）的玩家战绩。 */
 export interface ShareStats {
   charId: string;
+  /** 拿下了整场。 */
+  won: boolean;
+  /** 整场名次（1 = 冠军）。 */
   rank: number;
+  /** 同车人数。 */
   total: number;
-  score: number;
-  knockouts: number;
-  seatSeconds: number;
-  survived: boolean;
+  /** 玩家赢了几回合。 */
+  roundWins: number;
+  /** 这一场打了几回合。 */
+  rounds: number;
+  /** 整场把几个人扔 / 挤下车。 */
+  throwOuts: number;
+  /** 先赢几回合拿下整场，缺省 3。 */
+  winsNeeded?: number;
 }
 
-/** 梗文案。中文名自带梗（"买菜阿姨兰姐"），不需要额外设计。 */
-export function memeFor(s: ShareStats, victimName?: string): string {
-  if (s.rank === 1 && s.knockouts > 0) return `我一个人把 ${s.knockouts} 个人挤下了车`;
-  if (s.rank === 1) return '全程抱着扶手不撒手，赢了';
-  if (victimName) return `我把${victimName}挤下了车`;
-  if (!s.survived && s.rank >= s.total - 1) return '车门刚开，我人没了';
-  if (!s.survived) return '不是我菜，是这车太颠';
-  if (s.seatSeconds > 15) return `抢到座位坐了 ${s.seatSeconds} 秒，值了`;
-  return '这趟车是真的挤';
+/** 梗文案里点名的人：都是可选的，有就用。 */
+export interface MemeNames {
+  /** 被玩家扔下车的某个人（比如最近一个）。 */
+  victim?: string;
+  /** 把玩家扔下车的人（比如最近一次）。 */
+  killer?: string;
+}
+
+/**
+ * 梗文案。中文名自带梗（"买菜阿姨兰姐"），不需要额外设计。
+ * 点名的梗最有转发欲："我把兰姐从车门扔了出去" / "阿强，下回合我记住你了"。
+ * victim 和 killer 方向相反，分成两个字段传，免得把"被谁扔"写成"扔了谁"。
+ */
+export function memeFor(s: ShareStats, who: MemeNames = {}): string {
+  const need = s.winsNeeded ?? 3;
+  if (s.won) {
+    if (s.throwOuts >= 3) return `一个人扔下去 ${s.throwOuts} 个，这车我包了`;
+    if (who.victim) return `把${who.victim}扔下车，顺手拿下整场`;
+    if (s.throwOuts === 0) return '一个没扔，全靠抱紧扶手赢的';
+    return `先赢 ${s.roundWins} 回合，这趟车我说了算`;
+  }
+  if (s.roundWins > 0 && s.roundWins >= need - 1) {
+    return who.killer ? `就差一回合，被${who.killer}扔了下去` : '就差一回合，车门先开了';
+  }
+  if (who.victim && s.throwOuts >= 2) return `扔下去 ${s.throwOuts} 个，还是没挤赢`;
+  if (who.victim) return `我把${who.victim}从车门扔了出去`;
+  if (who.killer) return `${who.killer}，下回合我记住你了`;
+  if (s.roundWins === 0 && s.rank >= s.total) return '全程被人拎来拎去';
+  if (s.roundWins === 0) return '车门一开，我人没了';
+  return '不是我菜，是这车太挤';
 }
 
 function loadImage(src: string): Promise<HTMLImageElement | null> {
@@ -83,11 +113,11 @@ export async function renderShareCard(s: ShareStats, meme: string): Promise<stri
   ctx.fillText('好挤的大巴', W / 2, 190);
   ctx.fillStyle = '#8FB6D8';
   ctx.font = '40px "PingFang SC", sans-serif';
-  ctx.fillText('抢位置 · 抓扶手 · 把对手挤下车', W / 2, 256);
+  ctx.fillText('推倒 · 拖走 · 扔下车', W / 2, 256);
 
   // 角色立绘
   const def = CHARACTERS.find((x) => x.id === s.charId) ?? CHARACTERS[0];
-  const img = await loadImage(rolePortrait(s.charId));
+  const img = await loadImage(rolePortrait(def.id));
   const px = W / 2 - 230;
   const py = 330;
   ctx.save();
@@ -95,7 +125,7 @@ export async function renderShareCard(s: ShareStats, meme: string): Promise<stri
   ctx.clip();
   if (img) {
     // cover 裁切，再往上提一点让脸更靠中间。缩放时就把这段上提量算进去，
-    // 并把偏移夹在"始终盖满相框"的范围里 —— 以前直接上移 30px，图片刚好铺满时底部会露一条空白。
+    // 并把偏移夹在"始终盖满相框"的范围里，图片刚好铺满时底部不会露白。
     const lift = 30;
     const scale = Math.max(460 / img.width, (560 + lift) / img.height);
     const dw = img.width * scale;
@@ -107,24 +137,24 @@ export async function renderShareCard(s: ShareStats, meme: string): Promise<stri
     ctx.fillRect(px, py, 460, 560);
   }
   ctx.restore();
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 5;
+  ctx.strokeStyle = s.won ? '#FFD23F' : 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = s.won ? 8 : 5;
   roundRect(ctx, px, py, 460, 560, 40);
   ctx.stroke();
 
-  // 名次大字
-  ctx.fillStyle = s.rank === 1 ? '#FFD23F' : '#FFF4E2';
+  // 大字：拿下整场 / 第 N 名
+  ctx.fillStyle = s.won ? '#FFD23F' : '#FFF4E2';
   ctx.font = 'bold 150px "PingFang SC", sans-serif';
-  ctx.fillText(`第 ${s.rank} 名`, W / 2, 1070);
+  ctx.fillText(s.won ? '拿下整场' : `第 ${s.rank} 名`, W / 2, 1070);
   ctx.fillStyle = '#8FB6D8';
   ctx.font = '44px "PingFang SC", sans-serif';
-  ctx.fillText(`${def.name} · ${s.total} 人同车`, W / 2, 1136);
+  ctx.fillText(`${def.name} · ${s.total} 人抢一辆车`, W / 2, 1136);
 
   // 战绩行
   const stats: [string, string][] = [
-    ['得分', String(s.score)],
-    ['挤下', `${s.knockouts} 人`],
-    ['坐了', `${s.seatSeconds}s`]
+    ['赢了', `${s.roundWins} 回合`],
+    ['扔下车', `${s.throwOuts} 人`],
+    ['打了', `${s.rounds} 回合`]
   ];
   const bw = 300;
   stats.forEach(([label, val], i) => {
@@ -140,10 +170,17 @@ export async function renderShareCard(s: ShareStats, meme: string): Promise<stri
     ctx.fillText(val, bx + bw / 2, 1332);
   });
 
-  // 梗文案
+  // 梗文案：长了就缩字号，不能被裁掉。
   ctx.fillStyle = '#FFF4E2';
-  ctx.font = 'bold 56px "PingFang SC", sans-serif';
-  ctx.fillText(`「${meme}」`, W / 2, 1500);
+  const quote = `「${meme}」`;
+  let size = 56;
+  const fontAt = (px: number) => `bold ${px}px "PingFang SC", sans-serif`;
+  ctx.font = fontAt(size);
+  while (size > 36 && ctx.measureText(quote).width > W - 120) {
+    size -= 2;
+    ctx.font = fontAt(size);
+  }
+  ctx.fillText(quote, W / 2, 1500);
 
   // 底部召唤。这张图是发给朋友看的，看图的人不需要"长按保存"——那句提示
   // 只留在图外的浮层里（给保存的人看），图里只放号召语和网址。

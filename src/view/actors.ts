@@ -67,17 +67,12 @@ const BODY_HALF_W = 0.42 * MODEL_SCALE;
 const OCCLUDER_COVER = 0.25;
 const OCCLUDER_ALPHA = 0.28;
 
-/** 每个角色技能的标识色与图标，释放时用来做可区分的表现。 */
-export const SKILL_LOOK: Record<string, { color: number; icon: string }> = {
-  xiaoli: { color: 0x3b82f6, icon: '💼' },
-  xiaoxia: { color: 0x22c1a6, icon: '💨' },
-  aqiang: { color: 0xf59e0b, icon: '🛡️' },
-  lanjie: { color: 0xef4444, icon: '🧺' },
-  ayuan: { color: 0x8b5cf6, icon: '🧳' },
-  xiaomai: { color: 0xec4899, icon: '📣' },
-  amo: { color: 0x64748b, icon: '🌀' },
-  laozhou: { color: 0x84cc16, icon: '💤' }
-};
+/** 平衡值低于它开始站不稳（踉跄幅度随平衡值线性变大）。 */
+const WOBBLE_BELOW = 0.45;
+/** 被推硬直的参考时长（秒），踉跄幅度按它归一。 */
+const STUN_REF = 0.42;
+/** 被扔出去时抛物线的最高点（格）。 */
+const THROW_ARC = 0.9;
 
 function darken(hex: string, f: number): number {
   const c = new THREE.Color(hex);
@@ -96,7 +91,6 @@ const GEO = {
   shadow: new THREE.CircleGeometry(0.46, 20),
   ring: new THREE.RingGeometry(0.44, 0.56, 26),
   grabRing: new THREE.TorusGeometry(0.6, 0.048, 8, 22),
-  skillRing: new THREE.TorusGeometry(0.52, 0.045, 8, 24),
   arrow: new THREE.ConeGeometry(0.19, 0.34, 4)
 };
 
@@ -110,7 +104,6 @@ const SHARED = {
 };
 
 const labelCache = new Map<string, THREE.CanvasTexture>();
-const iconCache = new Map<string, THREE.CanvasTexture>();
 
 /** 名字牌：底色用角色配色，人挤成一团时靠颜色也能分辨。 */
 function labelTexture(name: string, color: string, isPlayer: boolean): THREE.Texture {
@@ -146,40 +139,16 @@ function labelTexture(name: string, color: string, isPlayer: boolean): THREE.Tex
   return t;
 }
 
-/** 技能图标：释放瞬间在头顶弹出来，玩家才知道"我刚才放了什么"。 */
-function iconTexture(icon: string): THREE.Texture {
-  const hit = iconCache.get(icon);
-  if (hit) return hit;
-  const c = document.createElement('canvas');
-  c.width = 128;
-  c.height = 128;
-  const ctx = c.getContext('2d')!;
-  ctx.fillStyle = 'rgba(255,255,255,0.94)';
-  ctx.beginPath();
-  ctx.arc(64, 64, 56, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.font = '68px "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(icon, 64, 70);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  iconCache.set(icon, t);
-  return t;
-}
-
-/** 单个人偶（含影子、配色地环、抓环、技能状态环、昵称、玩家指示箭头）。 */
+/** 单个人偶（含影子、配色地环、抓环、昵称、玩家指示箭头）。 */
 export class Actor {
   group: THREE.Group;
   private rig = new THREE.Group();
   private materials: THREE.Material[] = [];
   private grabRing: THREE.Mesh;
   private colorRing: THREE.Mesh;
-  private skillRing: THREE.Mesh;
-  private skillRingMat: THREE.MeshBasicMaterial;
-  private skillIcon: THREE.Sprite;
-  private skillIconMat: THREE.SpriteMaterial;
-  private iconTimer = 0;
+  /** 抓人时双手前伸的程度、摔倒/被拖/被扔时身体软掉的程度（0~1，平滑过渡用）。 */
+  private reach = 0;
+  private flop = 0;
   private nameLabel: THREE.Sprite;
   private labelMat: THREE.SpriteMaterial;
   /** 名字牌当前透明度与目标（由 ActorManager 做屏幕空间去重后给出）。 */
@@ -307,17 +276,6 @@ export class Actor {
     this.grabRing.visible = false;
     this.rig.add(this.grabRing);
 
-    // 持续型技能的状态环：技能还在生效时一直挂着，不是闪一下就没。
-    this.skillRingMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide
-    });
-    this.materials.push(this.skillRingMat);
-    this.skillRing = new THREE.Mesh(GEO.skillRing, this.skillRingMat);
-    this.skillRing.rotation.x = Math.PI / 2;
-    this.skillRing.position.y = 0.9;
-    this.skillRing.visible = false;
-    this.rig.add(this.skillRing);
-
     const s = isPlayer ? 1.28 : 1.0;
     const labelMat = new THREE.SpriteMaterial({
       map: labelTexture(name, color, isPlayer), transparent: true, depthTest: false, depthWrite: false
@@ -331,22 +289,13 @@ export class Actor {
     this.nameLabel.position.y = (isPlayer ? 1.88 : 1.66) * MODEL_SCALE + 0.22;
     this.group.add(this.nameLabel);
 
-    this.skillIconMat = new THREE.SpriteMaterial({
-      map: iconTexture('💼'), transparent: true, depthTest: false, depthWrite: false
-    });
-    this.materials.push(this.skillIconMat);
-    this.skillIcon = new THREE.Sprite(this.skillIconMat);
-    this.skillIcon.scale.set(0.72, 0.72, 1);
-    this.skillIcon.visible = false;
-    this.group.add(this.skillIcon);
-
     // 配件必须在头部节点建好之后挂 —— 放在手臂那一段会拿到 undefined 的 head。
     // 材质由 buildAccessories 新建，push 进 materials 随 dispose 一起释放。
     this.materials.push(...buildAccessories(look, {
       head: this.head, hip: this.rig, handL: this.handL, handR: this.handR
     }));
 
-    this.collectBodyMaterials([shadow, this.colorRing, this.grabRing, this.skillRing]);
+    this.collectBodyMaterials([shadow, this.colorRing, this.grabRing]);
 
     if (isPlayer) {
       // 玩家头顶的跳动箭头：8 个同款人偶里一眼找到自己。
@@ -376,16 +325,6 @@ export class Actor {
     this.ko = { t: 0, dx: dx / len, dz: dz / len, x0, z0, landT: -1, vz: 0, slide: 0, done: false };
   }
 
-  /** 技能释放瞬间：头顶弹出该角色专属的技能图标。 */
-  playSkill(defId: string) {
-    const look = SKILL_LOOK[defId];
-    if (!look) return;
-    this.skillIconMat.map = iconTexture(look.icon);
-    this.skillIconMat.needsUpdate = true;
-    this.skillRingMat.color.setHex(look.color);
-    this.iconTimer = 1.15;
-  }
-
   /**
    * 越肩贴身时隐藏玩家自己的名字牌和头顶箭头。
    * 镜头本身已经回答了"哪个是我"，这两个标记是正交远机位时代的遗留，
@@ -400,13 +339,9 @@ export class Actor {
     this.group.position.z = state.pos.z;
     this.group.rotation.y = state.facing;
 
-    // 被挤下车：最终淘汰和"下一站返场"都要演完摔飞再消失。
-    // 以前返场的人当场凭空消失，看起来像 bug 而不是"被挤下去了"。
-    const falling = state.status === 'eliminated' || (state.status === 'returning' && this.ko !== null);
-    if (falling) {
+    // 被挤下车：演完摔飞再消失。
+    if (state.status === 'eliminated') {
       this.nameLabel.visible = false;
-      this.skillIcon.visible = false;
-      this.skillRing.visible = false;
       if (this.arrow) this.arrow.visible = false;
       if (!this.ko) this.playEliminate(1, 0, state.pos.x, state.pos.z);
       this.colorRing.visible = false;
@@ -416,62 +351,59 @@ export class Actor {
       return;
     }
     if (this.ko) {
-      // 返场了：把摔飞演出的残留变换清干净。
+      // 新回合：把摔飞演出的残留变换清干净。
       this.ko = null;
       this.koAlpha = 1;
       this.rig.rotation.set(0, 0, 0);
       this.shadow.visible = true;
     }
 
-    if (state.status === 'returning') {
-      this.group.visible = false;
-      return;
-    }
-
-    // 受击保护期间闪烁，被推到了一眼能看出来。
-    this.group.visible = state.hitProtect <= 0 || Math.floor(t * 14) % 2 === 0;
+    this.group.visible = true;
     this.group.scale.set(1, 1, 1);
     this.nameLabel.visible = this.selfMarkers;
+
+    const down = state.status === 'down';
+    const carried = state.status === 'carried';
+    const thrown = state.status === 'thrown';
+    const limp = down || carried || thrown;
 
     // 坐姿：整体下沉 + 大腿前伸。没有这个的话坐着的人看起来像站在椅子上。
     const sitting = state.status === 'sitting';
     this.sitBlend += ((sitting ? 1 : 0) - this.sitBlend) * (1 - Math.exp(-12 * dt));
     this.rig.position.y = SIT_LIFT * this.sitBlend;
     // 大腿放平搭在座垫上：腿的胶囊绕自身中心转，所以要同时往上、往前挪一点。
-    this.legL.rotation.x = 1.35 * this.sitBlend;
-    this.legR.rotation.x = 1.35 * this.sitBlend;
     this.legL.position.y = 0.2 + 0.06 * this.sitBlend;
     this.legR.position.y = 0.2 + 0.06 * this.sitBlend;
     this.legL.position.z = 0.16 * MODEL_SCALE * this.sitBlend;
     this.legR.position.z = 0.16 * MODEL_SCALE * this.sitBlend;
 
-    // 步频跟实际位移速度成正比。原来是固定增量 `bobPhase += 0.35`，
-    // 所以慢走时脚在"飘"；用真实速度驱动才不打滑。
+    // 步频跟实际位移速度成正比，慢走时脚才不打滑。
     const moved = Math.hypot(state.pos.x - this.lastX, state.pos.z - this.lastZ);
     this.lastX = state.pos.x;
     this.lastZ = state.pos.z;
     const speed = dt > 1e-4 ? moved / dt : 0;
     this.speed01 += (Math.min(1, speed / BALANCE.walkSpeed) - this.speed01) * (1 - Math.exp(-14 * dt));
-    if (!sitting) this.gait += (speed / STRIDE) * dt * Math.PI * 2;
+    if (!sitting && !limp) this.gait += (speed / STRIDE) * dt * Math.PI * 2;
 
-    const walk = sitting ? 0 : this.speed01;
-    this.group.position.y = sitting
-      ? 0
-      : Math.abs(Math.sin(this.gait)) * 0.06 * walk + Math.sin(t * 2) * 0.015 * (1 - walk);
+    const walk = sitting || limp ? 0 : this.speed01;
+    let y = sitting ? 0 : Math.abs(Math.sin(this.gait)) * 0.06 * walk + Math.sin(t * 2) * 0.015 * (1 - walk);
 
-    // 抓扶手时把靠近扶手那只手举起来；不抓时缓缓放下。
-    const grabbing = state.grabHandrail !== null && state.alive;
-    this.armLift += ((grabbing ? 1 : 0) - this.armLift) * (1 - Math.exp(-11 * dt));
+    // 抓扶手：把靠近扶手那只手举起来；抓人：双手往前伸。
+    const holdRail = state.hold?.kind === 'rail';
+    const holdChar = state.hold?.kind === 'char';
+    this.armLift += ((holdRail ? 1 : 0) - this.armLift) * (1 - Math.exp(-11 * dt));
+    this.reach += ((holdChar ? 1 : 0) - this.reach) * (1 - Math.exp(-14 * dt));
     const baseL = -0.2;
     const baseR = 0.2;
-    this.armL.rotation.z = baseL + (this.liftRight ? 0 : (-2.5 - baseL)) * this.armLift;
-    this.armR.rotation.z = baseR + (this.liftRight ? (2.5 - baseR) : 0) * this.armLift;
+    let armZL = baseL + (this.liftRight ? 0 : (-2.5 - baseL)) * this.armLift;
+    let armZR = baseR + (this.liftRight ? (2.5 - baseR) : 0) * this.armLift;
 
-    // ---- 摆腿 / 摆臂 / 推挤 / 踉跄。优先级：坐 > 推挤 > 踉跄 > 走路 ----
+    // ---- 站立时的摆腿 / 摆臂 / 推挤 / 踉跄。优先级：坐 > 推挤 > 踉跄 > 走路 ----
     const swing = Math.sin(this.gait);
-    let legSwing = swing * 0.55 * walk;
-    let armSwingL = -swing * 0.42 * walk;
-    let armSwingR = swing * 0.42 * walk;
+    let legX = sitting ? 1.35 : swing * 0.55 * walk;
+    let legXR = sitting ? 1.35 : -swing * 0.55 * walk;
+    let armXL = -swing * 0.42 * walk;
+    let armXR = swing * 0.42 * walk;
     let leanX = 0.1 * walk;
     let leanZ = 0;
 
@@ -484,48 +416,103 @@ export class Actor {
         : e < 0.16
           ? 0.55 - 1.9 * ((e - 0.08) / 0.08)
           : -1.35 * Math.max(0, 1 - (e - 0.16) / 0.14);
-      armSwingL = thrust;
-      armSwingR = thrust;
+      armXL = thrust;
+      armXR = thrust;
       leanX = e < 0.08 ? -0.18 : 0.3;
-    } else if (state.stunTimer > 0 || state.hitProtect > 0) {
-      // 踉跄：往被推的反方向后仰，双臂上举失衡，叠一层高频抖动。
-      const k = Math.min(1, Math.max(state.stunTimer, state.hitProtect * 0.6) / BALANCE.stunDuration);
+    } else if (!sitting && (state.stunTimer > 0 || state.balance < WOBBLE_BELOW)) {
+      // 踉跄：被推的硬直，或平衡值偏低时站不稳。往受力的反方向后仰、双臂乱挥、叠一层抖动。
+      const k = Math.min(1, Math.max(state.stunTimer / STUN_REF, (WOBBLE_BELOW - state.balance) / WOBBLE_BELOW));
       const localAngle = Math.atan2(state.vel.x, state.vel.z) - state.facing;
-      leanX = -0.38 * k * Math.cos(localAngle);
-      leanZ = 0.38 * k * Math.sin(localAngle);
-      armSwingL = -1.15;
-      armSwingR = -1.15;
-      legSwing = 0.42 * k;
-      this.group.position.y += Math.sin(t * 38) * 0.02 * k;
+      const sway = Math.sin(t * 7 + state.id) * 0.18 * k;
+      leanX = -0.34 * k * Math.cos(localAngle) + sway;
+      leanZ = 0.34 * k * Math.sin(localAngle) + Math.cos(t * 6 + state.id) * 0.14 * k;
+      armXL = -1.0 * k + Math.sin(t * 13) * 0.4 * k;
+      armXR = -1.0 * k + Math.sin(t * 11 + 1) * 0.4 * k;
+      armZL = Math.min(armZL, -0.2 - 0.9 * k);
+      armZR = Math.max(armZR, 0.2 + 0.9 * k);
+      legX = 0.35 * k;
+      legXR = -0.2 * k;
+      y += Math.abs(Math.sin(t * 19)) * 0.02 * k;
+    }
+    // 抓人时双手平举向前，盖过走路摆臂。
+    if (this.reach > 0.01) {
+      armXL += (-1.45 - armXL) * this.reach;
+      armXR += (-1.45 - armXR) * this.reach;
+      armZL += (-0.12 - armZL) * this.reach;
+      armZR += (0.12 - armZR) * this.reach;
+      leanX += 0.12 * this.reach;
     }
 
-    if (!sitting) {
-      this.legL.rotation.x = legSwing;
-      this.legR.rotation.x = -legSwing;
+    // ---- 摔倒 / 被拖 / 被扔：身体软掉。和站姿之间平滑过渡，不会一帧突变 ----
+    this.flop += ((limp ? 1 : 0) - this.flop) * (1 - Math.exp(-(limp ? 16 : 7) * dt));
+    if (this.flop > 0.001) {
+      let fx = -1.5;
+      let fz = 0;
+      let fy = 0.06;
+      let aL = -0.3 + Math.sin(t * 3 + state.id) * 0.15;
+      let aR = 0.2 + Math.cos(t * 3.4 + state.id) * 0.15;
+      let aZL = -1.25;
+      let aZR = 1.25;
+      let lL = 0.25;
+      let lR = -0.15;
+      if (carried) {
+        // 被夹在拖人者身前：横着吊起来，四肢往下耷拉、跟着步子晃。
+        fx = 1.35;
+        fz = Math.sin(t * 6 + state.id) * 0.12;
+        fy = 0.5 + Math.sin(t * 9) * 0.04;
+        aL = 1.2 + Math.sin(t * 8) * 0.35;
+        aR = 1.2 + Math.sin(t * 8 + 1.3) * 0.35;
+        aZL = -0.2;
+        aZR = 0.2;
+        lL = 1.1 + Math.sin(t * 7) * 0.3;
+        lR = 1.1 + Math.sin(t * 7 + 1.7) * 0.3;
+      } else if (thrown) {
+        // 飞在空中：抛物线 + 翻滚 + 四肢乱甩。
+        const u = state.airDur > 0 ? Math.min(1, state.airT / state.airDur) : 1;
+        fy = 0.5 + 4 * THROW_ARC * u * (1 - u);
+        fx = -0.6 + u * 5.5;
+        fz = Math.sin(u * 9) * 0.6;
+        aL = -1.6 + Math.sin(t * 17) * 0.5;
+        aR = -1.6 + Math.sin(t * 15 + 1) * 0.5;
+        lL = 0.8 + Math.sin(t * 13) * 0.5;
+        lR = -0.8 + Math.sin(t * 12) * 0.5;
+      } else {
+        // 瘫在地上：身体偶尔抽一下，看得出是"晕了"而不是"死了"。
+        fz = Math.sin(t * 2.3 + state.id) * 0.06;
+        fy += Math.max(0, Math.sin(t * 5 + state.id)) * 0.015;
+      }
+      const f = this.flop;
+      leanX += (fx - leanX) * f;
+      leanZ += (fz - leanZ) * f;
+      y += (fy - y) * f;
+      armXL += (aL - armXL) * f;
+      armXR += (aR - armXR) * f;
+      armZL += (aZL - armZL) * f;
+      armZR += (aZR - armZR) * f;
+      legX += (lL - legX) * f;
+      legXR += (lR - legXR) * f;
     }
-    this.armL.rotation.x = armSwingL;
-    this.armR.rotation.x = armSwingR;
+
+    this.group.position.y = y;
+    this.legL.rotation.x = legX;
+    this.legR.rotation.x = legXR;
+    this.armL.rotation.x = armXL;
+    this.armR.rotation.x = armXR;
+    this.armL.rotation.z = armZL;
+    this.armR.rotation.z = armZR;
     this.rig.rotation.x = leanX;
     this.rig.rotation.z = leanZ;
 
-    this.grabRing.visible = grabbing;
-    this.colorRing.visible = state.alive;
+    this.grabRing.visible = holdRail;
+    this.colorRing.visible = state.alive && !carried && !thrown;
+    this.shadow.visible = !thrown;
     if (this.arrow) {
       this.arrow.visible = this.selfMarkers;
       this.arrow.position.y = 1.5 * MODEL_SCALE + 0.2 + Math.sin(t * 5) * 0.09;
     }
 
-    // 持续型技能：环一直转着，玩家知道自己还在增益里。
-    const active = state.skillRemaining > 0;
-    this.skillRing.visible = active;
-    if (active) {
-      this.skillRing.rotation.z = t * 2.4;
-      this.skillRingMat.opacity = 0.38 + Math.sin(t * 8) * 0.16;
-    }
-
-    // 透视下 Sprite 的世界尺寸会近大远小：8 米外的人小到看不清，2 米外的自己
-    // 占掉半个屏幕。这里做"部分补偿"——夹在 0.6~1.7 之间，既保证远处可读，
-    // 又保留"谁近谁远"的深度线索（完全恒定屏幕尺寸会让人挤成一团时糊掉）。
+    // 透视下 Sprite 的世界尺寸会近大远小：做"部分补偿"，夹在 0.6~1.7 之间，
+    // 既保证远处可读，又保留"谁近谁远"的深度线索。
     const dist = Math.hypot(
       camPos.x - state.pos.x,
       camPos.y - this.group.position.y,
@@ -534,21 +521,8 @@ export class Actor {
     const distK = Math.min(1.7, Math.max(0.6, dist / LABEL_REF_DIST));
     this.labelNear = Math.min(1, Math.max(0, (dist - LABEL_NEAR_HIDE) / (LABEL_NEAR_FULL - LABEL_NEAR_HIDE)));
     this.nameLabel.scale.set(this.labelBaseW * distK, this.labelBaseH * distK, 1);
-    // 近的名字牌盖住远的。透视下必须用真实距离，固定方位角那套已经不成立。
+    // 近的名字牌盖住远的。
     this.nameLabel.renderOrder = 900 + Math.round((LABEL_MAX_DIST - Math.min(dist, LABEL_MAX_DIST)) * 8);
-
-    if (this.iconTimer > 0) {
-      this.iconTimer -= dt;
-      const life = Math.max(0, this.iconTimer / 1.15);
-      this.skillIcon.visible = true;
-      // 贴身镜头下上浮量要收一半，否则图标会飞出画面。
-      this.skillIcon.position.y = 1.55 * MODEL_SCALE + 0.5 + (1 - life) * 0.25;
-      this.skillIconMat.opacity = Math.min(1, life * 2.2);
-      const sc = 0.72 * distK * (0.7 + (1 - life) * 0.5);
-      this.skillIcon.scale.set(sc, sc, 1);
-    } else {
-      this.skillIcon.visible = false;
-    }
   }
 
   /**
@@ -797,7 +771,7 @@ export class ActorManager {
     const W = stage.offsetWidth || 1;
     const H = stage.offsetHeight || 1;
     const PAD = 8;
-    this.zones = ['#joystick-base', '#btn-push', '#btn-dash', '#btn-skill', '#btn-grab'].flatMap((sel) => {
+    this.zones = ['#joystick-base', '#btn-push', '#btn-dash', '#btn-grab'].flatMap((sel) => {
       const el = hud.querySelector(sel) as HTMLElement | null;
       if (!el || !el.offsetWidth) return [];
       let x = 0;

@@ -4,68 +4,113 @@
  * 必须每次读写都 try/catch：微信无痕模式、iOS 存储满、企业微信内核都会让
  * localStorage 直接抛异常，抛出来就是白屏。全游戏只用一个 key 存一份 JSON，
  * 写入做防抖，不要每帧写。
+ *
+ * v2（派对玩法，docs/08）：记的是"整场"的结果 —— 先赢 3 回合拿下整场，没有积分。
+ * v1 存档（旧玩法：名次、积分、坐座秒数）读到时只保留音效开关，其余从零开始：
+ * 旧数据在新规则下没有意义；教学也要重新出一次，因为操作（抓 / 推·扔 / 冲）整个换了。
  */
 
 const KEY = 'crowdedbus.v1';
 const SAVE_DEBOUNCE_MS = 600;
 
 export interface Profile {
-  v: 1;
-  /** 打过多少局。用局数而不是布尔判断要不要出教学：清缓存重来一遍不亏。 */
+  v: 2;
+  /** 打完的整场数。用局数而不是布尔判断要不要出教学：清缓存重来一遍不亏。 */
   matches: number;
+  /** 拿下的整场数。 */
+  wins: number;
+  /** 累计打过的回合数。 */
+  rounds: number;
+  /** 累计赢下的回合数。 */
+  roundWins: number;
+  /** 累计扔 / 挤下车的人数。 */
+  throwOuts: number;
+  /** 当前整场连胜。 */
+  streak: number;
+  /** 最好成绩（单场）。 */
+  best: {
+    /** 单场最多扔下车几人。 */
+    throwOuts: number;
+    /** 单场最多赢几回合（拿下整场时就是先赢的回合数）。 */
+    roundWins: number;
+    /** 最长整场连胜。 */
+    streak: number;
+  };
+  /** 上次用的角色：回大厅时默认选中它。 */
+  lastCharId: string | null;
   /** 跳过了教学。 */
   tutorialSkipped: boolean;
-  best: {
-    rank: number;
-    score: number;
-    knockouts: number;
-    seatSeconds: number;
-  };
-  /**
-   * 累计量，用于角色解锁条件。
-   * 新加的字段（如 pushHits）在旧存档里不存在：read() 用 EMPTY.totals 打底再覆盖，缺的自动补 0。
-   */
-  totals: {
-    knockouts: number;
-    /** 有效推中别人的次数（兰姐解锁）。 */
-    pushHits: number;
-    seatSeconds: number;
-    survived: number;
-  };
-  /** 最近 10 局。 */
-  history: { rank: number; score: number; at: number }[];
-  /** 音效开关（含震动）。旧存档没有这个字段，read() 按缺省"开"补上，不用升版本。 */
+  /** 最近 10 场。 */
+  history: { won: boolean; roundWins: number; throwOuts: number; at: number }[];
+  /** 音效开关（含震动）。字段缺失按"开"补上。 */
   sound: boolean;
 }
 
-const EMPTY: Profile = {
-  v: 1,
+const fresh = (): Profile => ({
+  v: 2,
   matches: 0,
+  wins: 0,
+  rounds: 0,
+  roundWins: 0,
+  throwOuts: 0,
+  streak: 0,
+  best: { throwOuts: 0, roundWins: 0, streak: 0 },
+  lastCharId: null,
   tutorialSkipped: false,
-  best: { rank: 99, score: 0, knockouts: 0, seatSeconds: 0 },
-  totals: { knockouts: 0, pushHits: 0, seatSeconds: 0, survived: 0 },
   history: [],
   sound: true
-};
+});
+
+/** 非负整数，读坏了（NaN、负数、字符串）一律按 0。 */
+const count = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+
+/** 只认显式的 false：字段缺失或被写坏都当"开"，宁可有声也别让玩家以为游戏坏了。 */
+const soundOf = (raw: Record<string, unknown>): boolean => raw.sound !== false;
+
+/** 把任意 JSON 规整成 v2 存档：缺什么补默认值，类型不对的丢掉。 */
+function normalize(raw: Record<string, unknown>): Profile {
+  const p = fresh();
+  p.sound = soundOf(raw);
+  if (raw.v !== 2) return p; // v1 或更早：只保留音效开关
+  p.matches = count(raw.matches);
+  p.wins = Math.min(count(raw.wins), p.matches);
+  p.rounds = count(raw.rounds);
+  p.roundWins = Math.min(count(raw.roundWins), p.rounds);
+  p.throwOuts = count(raw.throwOuts);
+  p.streak = count(raw.streak);
+  const best = (raw.best && typeof raw.best === 'object' ? raw.best : {}) as Record<string, unknown>;
+  p.best = {
+    throwOuts: count(best.throwOuts),
+    roundWins: count(best.roundWins),
+    streak: Math.max(count(best.streak), p.streak)
+  };
+  p.lastCharId = typeof raw.lastCharId === 'string' ? raw.lastCharId : null;
+  p.tutorialSkipped = raw.tutorialSkipped === true;
+  p.history = Array.isArray(raw.history)
+    ? raw.history
+      .filter((h): h is Record<string, unknown> => !!h && typeof h === 'object')
+      .map((h) => ({
+        won: h.won === true,
+        roundWins: count(h.roundWins),
+        throwOuts: count(h.throwOuts),
+        at: count(h.at)
+      }))
+      .slice(-10)
+    : [];
+  return p;
+}
 
 function read(): Profile {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...EMPTY, best: { ...EMPTY.best }, totals: { ...EMPTY.totals }, history: [] };
-    const p = JSON.parse(raw) as Partial<Profile>;
-    if (p.v !== 1) return { ...EMPTY, best: { ...EMPTY.best }, totals: { ...EMPTY.totals }, history: [] };
-    return {
-      ...EMPTY,
-      ...p,
-      best: { ...EMPTY.best, ...(p.best ?? {}) },
-      totals: { ...EMPTY.totals, ...(p.totals ?? {}) },
-      history: Array.isArray(p.history) ? p.history.slice(-10) : [],
-      // 只认显式的 false：字段缺失或被写坏都当"开"，宁可有声也别让玩家以为游戏坏了。
-      sound: p.sound !== false
-    };
+    if (!raw) return fresh();
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return fresh();
+    return normalize(parsed as Record<string, unknown>);
   } catch {
-    // 存储不可用（无痕/配额满）时退回内存态，游戏照常能玩。
-    return { ...EMPTY, best: { ...EMPTY.best }, totals: { ...EMPTY.totals }, history: [] };
+    // 存储不可用（无痕/配额满）或 JSON 写坏了：退回内存态，游戏照常能玩。
+    return fresh();
   }
 }
 
@@ -95,41 +140,59 @@ export function saveProfile(next: Profile): void {
   saveTimer = setTimeout(writeNow, SAVE_DEBOUNCE_MS);
 }
 
+/** 一整场（先赢 3 回合的那一场）的结果。 */
 export interface MatchOutcome {
-  rank: number;
-  score: number;
-  knockouts: number;
-  /** 本局有效推中次数。可缺省（按 0 记），免得别处构造结果时漏填就写坏存档。 */
-  pushHits?: number;
-  seatSeconds: number;
-  survived: boolean;
+  charId: string;
+  /** 拿下了整场。 */
+  won: boolean;
+  /** 这一场打了几回合。 */
+  rounds: number;
+  /** 玩家赢了几回合。 */
+  roundWins: number;
+  /** 整场把几个人扔 / 挤下车。 */
+  throwOuts: number;
 }
 
 /**
- * 记录一局结果，返回刷新了哪些纪录（结算页用来打"新纪录"）。
+ * 记录一整场结果，返回刷新了哪些纪录（结算页用来打"新纪录"）。
  *
- * 首局只建立基线、不报纪录：以前 best.rank 初始是 99，第一局哪怕倒数第一
- * 也会弹"🎉 新纪录：最好名次 第 8 名"，等于在嘲讽新手。
+ * 首局只建立基线、不报纪录：否则第一场哪怕一回合没赢，也会弹"新纪录"，等于在嘲讽新手。
+ * 拿下整场时"单场最多赢几回合"必然刷新，不单独报（"拿下整场"本身更响亮）。
  */
 export function applyMatchResult(o: MatchOutcome): string[] {
   const p = getProfile();
   const records: string[] = [];
   const hasBaseline = p.matches > 0;
   const note = (text: string) => { if (hasBaseline) records.push(text); };
-  if (o.rank < p.best.rank) { p.best.rank = o.rank; note(`最好名次 第 ${o.rank} 名`); }
-  if (o.score > p.best.score) { p.best.score = o.score; note(`最高分 ${o.score}`); }
-  if (o.knockouts > p.best.knockouts) {
-    p.best.knockouts = o.knockouts;
-    note(`单局最多挤下 ${o.knockouts} 人`);
+  const throwOuts = count(o.throwOuts);
+  const roundWins = count(o.roundWins);
+
+  if (o.won) {
+    if (p.wins === 0) note('第一次拿下整场');
+    p.wins++;
+    p.streak++;
+    if (p.streak > p.best.streak) {
+      p.best.streak = p.streak;
+      if (p.streak >= 2) note(`连胜 ${p.streak} 场`);
+    }
+  } else {
+    p.streak = 0;
   }
-  if (o.seatSeconds > p.best.seatSeconds) p.best.seatSeconds = o.seatSeconds;
-  p.totals.knockouts += o.knockouts;
-  // 旧存档可能读出 NaN/undefined（被手改或写坏），这里兜底成数字再累加。
-  p.totals.pushHits = (Number.isFinite(p.totals.pushHits) ? p.totals.pushHits : 0) + (o.pushHits ?? 0);
-  p.totals.seatSeconds += o.seatSeconds;
-  if (o.survived) p.totals.survived++;
+  if (throwOuts > p.best.throwOuts) {
+    p.best.throwOuts = throwOuts;
+    note(`单场扔下车 ${throwOuts} 人`);
+  }
+  if (roundWins > p.best.roundWins) {
+    p.best.roundWins = roundWins;
+    if (!o.won) note(`单场赢了 ${roundWins} 回合`);
+  }
+
   p.matches++;
-  p.history = [...p.history, { rank: o.rank, score: o.score, at: Date.now() }].slice(-10);
+  p.rounds += count(o.rounds);
+  p.roundWins += roundWins;
+  p.throwOuts += throwOuts;
+  p.lastCharId = o.charId;
+  p.history = [...p.history, { won: o.won, roundWins, throwOuts, at: Date.now() }].slice(-10);
   saveProfile(p);
   return records;
 }

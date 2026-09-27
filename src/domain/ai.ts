@@ -1,486 +1,668 @@
-import { V2, v2Sub, v2Norm, v2Dist, v2Len, type Vec2 } from '../core/math';
+import { V2, v2Sub, v2Norm, v2Dist, v2Len, v2Add, v2Scale, type Vec2 } from '../core/math';
 import { BALANCE } from '../config/balance';
 import type { InputFrame, Button } from '../core/input';
-import type { CharacterState, Phase, ActiveEvent } from './types';
-import { distToRect, seatFrontPoint, type BusLayout, type Seat } from './layout';
-import type { HotZone } from './hotzone';
+import type { CharacterState, NpcState, Phase, ActiveEvent } from './types';
+import { doorCenterZ, type BusLayout, type Door } from './layout';
 import type { NavGrid } from './nav';
-import { SEAT } from '../config/balance';
 
-export interface BotContext {
-  characters: CharacterState[];
-  phase: Phase;
-  event: ActiveEvent | null;
-  layout: BusLayout;
-  time: number;
-  crowd: number;
-  /** 座位是否空着。座位是主要产出源，AI 不会抢就等于把分白送给玩家。 */
-  seatFree: (id: number) => boolean;
-  /** 扶手是否空着：以前 bot 只认最近的扶手，被占了也跑过去按，原地"抓空"。 */
-  railFree: (id: number) => boolean;
-  /** 按技能现在能不能放出来（冷却 + 阿远身前放不放得下箱子）。别往墙上扔箱子。 */
-  canUseSkill: (id: number) => boolean;
-  hotZone: HotZone;
-  /** 静态寻路：绕开立杆、座垫、障碍物。 */
-  nav: NavGrid;
+/** "抓"这一按会做什么（Simulation.grabPreview）。 */
+export interface GrabPreview {
+  kind: 'none' | 'stand' | 'release' | 'seat' | 'rail' | 'char';
+  /** 座位 / 扶手 / 角色 id；none 为 -1。 */
+  id: number;
 }
 
-interface BotMemory {
-  target: Vec2 | null;
-  timer: number;
-  grabTimer: number;
-  pushTimer: number;
-  skillTimer: number;
-  /** 进入危险区后的反应延迟：机器人不能瞬间做出完美闪避，否则一局下不了车。 */
-  panic: number;
-  /**
-   * 还能在座位上赖多久。
-   * 没有它，7 个机器人会把 4 个座位从头垄断到尾，玩家整局抢不到一个 ——
-   * probe 里玩家所有策略的名次都卡在 6.3~7.2 就是这么来的。
-   * 现实里乘客也会到站起身，这条既解决平衡又符合题材。
-   */
+/** 机器人能看到的规则层状态（Simulation 实现它）。 */
+export interface BotView {
+  readonly characters: readonly CharacterState[];
+  readonly npcs: readonly NpcState[];
+  readonly layout: BusLayout;
+  readonly phase: Phase;
+  readonly time: number;
+  readonly event: ActiveEvent | null;
+  readonly nav: NavGrid;
+  readonly arrived: boolean;
+  /** 正在进站刹车、马上要开的门。 */
+  readonly pendingDoor: Door | null;
+  /** 离下一次开门还有多久。 */
+  readonly timeToDoors: number;
+  openDoors(): Door[];
+  seatFree(id: number): boolean;
+  railFree(id: number, forId?: number): boolean;
+  seatApproach(id: number): Vec2;
+  canSit(id: number): boolean;
+  isSeatMoving(id: number): boolean;
+  grabImmune(id: number): boolean;
+  grabPreview(id: number): GrabPreview;
+  throwWouldExit(id: number): boolean;
+  throwAim(id: number): Vec2 | null;
+}
+
+interface Mem {
+  /** 进攻欲望 0.3~1：≥ HUNTER 的开门时会去门口找人下手，其余的开门时躲扶手/座位。 */
+  aggr: number;
+  /** 爱坐：没事就去抢座，没空座会去拽坐着的人。 */
+  seatLover: boolean;
+  /** 被扯住后多久按"推"挣脱。 */
+  struggle: number;
+  /** 坐着还愿意坐多久（到点起身找人打）。 */
   seatHold: number;
+  /** 平时抓着扶手还愿意抓多久。 */
+  railHold: number;
   /**
-   * 从对局第几秒起才开始找座位（含拽人）。
-   *
-   * 以前 7 个 bot 一关门就同时扑向 4 个座位，玩家实测 3 局 2 局发车时座位全满，
-   * "抢座"对玩家根本不存在。现在只有 3 个"急性子"一关门就找座，其余的人先站着，
-   * 发车后 1~4 秒才加入 —— 进入行驶时 1~2 个空座的局约占 90%（probe 150 局：
-   * 1 个空座 52 局、2 个 84 局），玩家按导航走过去基本都能抢到，但得快。
+   * 当前正在打的人（-1 = 没在打）。每帧决策开始时清空、由"正在下手"的分支重新写入，
+   * 所以它永远是新鲜的 —— 玩家的围攻名额（MAX_PLAYER_HUNTERS）按它算，不能被坐着/抓扶手的机器人白占。
    */
-  seatAfter: number;
+  preyId: number;
+  /** 上一帧打的人（挑猎物时的"别换人"加成用它）。 */
+  lastPrey: number;
+  preyT: number;
+  /** 推的节奏（别每冷却一好就推，给玩家喘息）。 */
+  pushT: number;
+  roam: Vec2 | null;
+  roamT: number;
+  /** 反卡死：想走但一直没挪动。 */
+  lastPos: Vec2;
+  stillT: number;
+  /** 反卡死触发后，这段时间里放弃当前目标、随便走走。 */
+  detourT: number;
+  detour: Vec2 | null;
+  /** 拽起别人后要抢的座位。 */
+  yankSeat: number;
+  /** 开门/机关的反应延迟（不是瞬间完美反应）。 */
+  react: number;
 }
 
-const btnSet = (...b: Button[]) => new Set<Button>(b);
+const EMPTY = new Set<Button>();
+const HELD_GRAB = new Set<Button>(['grab']);
+const PRESS_GRAB = new Set<Button>(['grab']);
+const PRESS_PUSH = new Set<Button>(['push']);
+const PRESS_DASH = new Set<Button>(['dash']);
+const NONE: InputFrame = { move: V2(), pressed: EMPTY, held: EMPTY };
 
 /**
- * 上车后的站位：每个 bot 一个，彼此相距 ≥ 1.0，离立杆 ≥ 0.7、离座垫/障碍物 ≥ 0.6。
- * 分布在车厢后半段（后门进来近），不会堵在门口。
+ * aggr（0.3~1 均匀分布）≥ 这个值的机器人，平时到站开门时去门口找人下手，约三分之一；
+ * 其余的开门时躲到离门远的扶手/座位上。杀红了眼（见 WILD_*）时所有机器人都下手。
+ * 由 probe 扫出来：0.65 时每回合淘汰 4.98 人（贴着 5 的上限），0.8 时提前结束只有 33%，0.75 两头余量最大。
+ */
+const HUNTER = 0.75;
+/** 同一时刻最多几个机器人盯着玩家（要热闹，但别让玩家毫无还手之力）。 */
+const MAX_PLAYER_HUNTERS = 2;
+/**
+ * 杀红了眼：车上只剩 WILD_ALIVE 个人以内，或者进入好挤模式那一刻只剩 WILD_FINALE_ALIVE 个以内
+ * （即途中已经有人下车），所有机器人都变成猎手，离开扶手和座位去抢最后的位置。
+ *
+ * 没有这一条，人一少大家就各抱一根扶手、各坐一个座位熬到终点，"只剩 1 人提前结束"几乎不会发生
+ * （探针实测 1%）。好挤模式按"开场那一刻"锁定而不是随时判断：这样回合是两种走向之一 ——
+ * 途中没人下车就相对平稳地到站（好几个人一起赢），途中有人下车就一路杀到只剩一个。
+ * 淘汰数因此是双峰分布，才能同时满足"平均淘汰 3~5 人"和"30%~60% 提前结束"。
+ */
+const WILD_ALIVE = 4;
+/** 残局人数：这时候机器人冲撞不再挑时机、扶手上的人也照打不误。 */
+const ENDGAME_ALIVE = 3;
+const WILD_FINALE_ALIVE = 7;
+
+/**
+ * 上车后的站位：彼此 ≥ 1.0，离立杆 ≥ 0.6，离座位接近点 ≥ 1.0，不在门口正前方。
  */
 const BOARD_SPOTS: Vec2[] = [
-  V2(-0.8, -5.5), V2(0.8, -5.5), V2(-0.8, -2.9), V2(0.8, -3.1),
-  V2(-0.6, -1.2), V2(0.6, 0.9), V2(-0.7, 1.9)
+  V2(1.3, -2.9), V2(-1.3, -3.0), V2(0.8, -1.6), V2(-1.0, -1.9),
+  V2(-0.9, -0.4), V2(0.9, 0.9), V2(-0.9, 1.9)
 ];
 
-/** 发车（进入行驶）的对局时刻。 */
-const DEPART_AT = BALANCE.boardDuration + BALANCE.ignitionDuration;
+const frame = (move: Vec2, pressed: Set<Button> = EMPTY, held: Set<Button> = EMPTY): InputFrame =>
+  ({ move, pressed, held });
+
+const facingVec = (a: number): Vec2 => ({ x: Math.sin(a), z: Math.cos(a) });
+
+/** 朝向与目标方向的夹角余弦。 */
+function aimCos(c: CharacterState, target: Vec2): number {
+  const to = v2Sub(target, c.pos);
+  const d = v2Len(to);
+  if (d < 1e-6) return 1;
+  const f = facingVec(c.facing);
+  return (to.x * f.x + to.z * f.z) / d;
+}
+
+/** 拖人去门口时的站位：门洞正对面、立杆外侧（0、4 号立杆正好挡在两扇门的中线上，从杆后面扔会砸到杆）。 */
+export function carryStage(door: Door, v: BotView): Vec2 {
+  return V2(v.layout.interior.maxX - 1.5, doorCenterZ(door));
+}
+
 /**
- * 一关门就找座的 bot。按 id 取而不是随机：session 每局都会打乱角色顺序，
- * 按 id 固定名额已经足够随机，而且保证"急性子"恰好 3 个 —— 4 个就又是发车即满座，
- * 2 个则空座太多、"坐着不动"反成最优（probe 里 SITTER 胜率冲到 40%）。
+ * 拖着人去门口：先走到 carryStage（返回 null 表示调用方用寻路走过去），
+ * 到了就朝门外迈步，把身子和手里的人一起转向门，对准了由调用方按"扔"。门还没开时到了就等着。
  */
-const EAGER_SEATERS: ReadonlySet<number> = new Set([2, 5, 7]);
-/** 其余 bot 在发车后多少秒开始加入抢座：[MIN, MIN + SPREAD)。 */
-const SEAT_DELAY_MIN = 1;
-const SEAT_DELAY_SPREAD = 3;
+export function carryToDoor(c: CharacterState, door: Door, v: BotView, open: boolean): Vec2 | null {
+  // 已经有一条畅通的扔出线：原地转身对准（慢慢挪着转，手里的人跟着甩过去）。
+  const aim = open ? v.throwAim(c.id) : null;
+  if (aim) return v2Scale(aim, 0.3);
+  const I = v.layout.interior;
+  const zc = doorCenterZ(door);
+  const stage = carryStage(door, v);
+  const atStage = v2Dist(c.pos, stage) < 0.6 || (c.pos.x > stage.x - 0.2 && Math.abs(c.pos.z - zc) < 0.9);
+  if (!atStage) return null;
+  if (!open) return V2();
+  return v2Scale(v2Norm(v2Sub(V2(I.maxX + 1.5, zc), c.pos)), 0.6);
+}
+
 /**
- * bot 坐多久主动让座：[MIN, MIN + SPREAD) 秒。
- * 座位现在可以被"连推三下"拽起来，换座主要靠推挤；主动让座太勤（旧值 6~13 秒）
- * 等于不停白送空座，"抢到就坐着不动"又会重新变成最优解。
+ * 机器人。每个 Simulation 一个实例，记忆随回合重建（不再是模块级全局状态，
+ * 同时跑多个模拟、按回合新建模拟都不会串数据）。
  */
-const SEAT_HOLD_MIN = 20;
-const SEAT_HOLD_SPREAD = 10;
-/** 没空座时，多远以内的"坐着的人"值得过去拽（旧值 4.5 基本只够到隔壁座）。 */
-const SEAT_ATTACK_RANGE = 8;
-/**
- * 胆大的 bot：到站开门时会去门口黄圈刷分，被挤到离门 1.0 以内才慌。
- * 取 3 个非"急性子"的（急性子忙着抢座，见 EAGER_SEATERS）。
- * 没有他们，门口永远没人，"往门外推"这条进攻线在对局里不存在。
- */
-const BRAVE_BOTS: ReadonlySet<number> = new Set([1, 4, 6]);
-const BRAVE_PANIC_DIST = 1.0;
-/**
- * 坏心眼的 bot：车门开着时（到站和终局），专挑离门最近、站着又没抓扶手的人，
- * 绕到他靠车厢内侧的一边往门外推（和 probe 里的 SMART 打法同一个思路）。
- *
- * 以前 bot 只会"顺手推身边的人"：玩家抓扶手不动时，300 局里 74% 的局没有任何 bot 掉下车，
- * 平均每局 0.33 次，"把对手挤下车"这条标语在对局里基本看不到。
- * 现在同口径每局约 1.5 次、终局前约占六成、"0 次"的局约 23%。
- *
- * 只有 2 个：3 个时会抢走玩家进攻打法的猎物、推挤扇形还会连带把守在门边的玩家推下去
- * （probe 里 SMART 存活率 91% → 71%）。坏心眼也不把玩家当目标、玩家在推挤扇形里时先不推 ——
- * 新增的这股推力只在 bot 之间发生，玩家承受的压力和改前一样（普通 bot 照旧会推玩家）。
- * probe 180 局对比：SITTER/BALANCED/TURTLE 存活率 90%/90%/88% → 92%/91%/88%。
- */
-const BULLY_BOTS: ReadonlySet<number> = new Set([3, 7]);
-/** 离门多远以内的人算"值得推"的目标。 */
-const BULLY_RANGE = 3.0;
+export class BotBrain {
+  private mem = new Map<number, Mem>();
+  /** 本帧是否"杀红了眼"（见 WILD_ALIVE）。 */
+  private wild = false;
+  /** 进入好挤模式那一刻车上还剩几人（-1 = 还没到）。 */
+  private finaleAlive = -1;
+  /** 残局：只剩 ENDGAME_ALIVE 人以内，谁也不躲，死盯一个打到底。 */
+  private endgame = false;
 
-/** 玩家是否在这个 bot 此刻推挤的扇形范围里（与 simulation 的推挤判定同一口径）。 */
-function playerInPushCone(char: CharacterState, ctx: BotContext): boolean {
-  const f = V2(Math.sin(char.facing), Math.cos(char.facing));
-  for (const o of ctx.characters) {
-    if (!o.isPlayer || !o.alive) continue;
-    const to = v2Sub(o.pos, char.pos);
-    const d = v2Len(to);
-    if (d > BALANCE.pushRange || d < 1e-6) continue;
-    if ((to.x * f.x + to.z * f.z) / d >= 0.25) return true;
-  }
-  return false;
-}
+  constructor(private rnd: () => number) {}
 
-const memory = new Map<number, BotMemory>();
-/** bot 记忆初始化也要走对局种子，否则同一 seed 跑两次结果不同。 */
-let memRnd: () => number = Math.random;
-
-function mem(id: number): BotMemory {
-  let m = memory.get(id);
-  if (!m) {
-    m = {
-      target: null,
-      timer: 0,
-      grabTimer: 0.6 + memRnd(),
-      pushTimer: 0.8 + memRnd() * 1.4,
-      skillTimer: 3 + memRnd() * 4,
-      panic: 0.3,
-      seatHold: SEAT_HOLD_MIN + memRnd() * SEAT_HOLD_SPREAD,
-      seatAfter: EAGER_SEATERS.has(id)
-        ? 0
-        : DEPART_AT + SEAT_DELAY_MIN + memRnd() * SEAT_DELAY_SPREAD
-    };
-    memory.set(id, m);
-  }
-  return m;
-}
-
-/** 当前开着的门的“门口点”（车厢内侧靠门那一格）。 */
-function openDoorPoints(layout: BusLayout): Vec2[] {
-  const out: Vec2[] = [];
-  for (const d of layout.doors) {
-    if (!d.open) continue;
-    out.push(V2(layout.interior.maxX - 0.2, (d.zMin + d.zMax) / 2));
-  }
-  return out;
-}
-
-function nearestDist(p: Vec2, pts: Vec2[]): number {
-  let best = Infinity;
-  for (const q of pts) best = Math.min(best, v2Dist(p, q));
-  return best;
-}
-
-function randomInteriorTarget(layout: BusLayout, rnd: () => number): Vec2 {
-  const r = layout.interior;
-  return V2(
-    r.minX + 1.2 + rnd() * (r.maxX - r.minX - 2.6),
-    r.minZ + 1.2 + rnd() * (r.maxZ - r.minZ - 2.4)
-  );
-}
-
-/** 去某个点：交给寻路（绕立杆/座垫/障碍物）；到了就返回零向量，别顶着东西原地踩。 */
-function go(char: CharacterState, ctx: BotContext, target: Vec2): Vec2 {
-  return ctx.nav.steer(char.id, char.pos, target, ctx.time).dir;
-}
-
-/** 最近的扶手；优先空着的，全被占了才退而求其次（站过去等着也比乱跑强）。 */
-function pickRail(char: CharacterState, ctx: BotContext): { pos: Vec2; dist: number } | null {
-  let best: Vec2 | null = null;
-  let bestD = Infinity;
-  for (const pass of [true, false]) {
-    for (const h of ctx.layout.handrails) {
-      if (pass && !ctx.railFree(h.id)) continue;
-      const d = v2Dist(char.pos, h);
-      if (d < bestD) { bestD = d; best = V2(h.x, h.z); }
+  private m(c: CharacterState): Mem {
+    let m = this.mem.get(c.id);
+    if (!m) {
+      const r = this.rnd;
+      m = {
+        aggr: 0.3 + r() * 0.7,
+        seatLover: r() < 0.4,
+        struggle: 0.3 + r() * 0.4,
+        seatHold: 8 + r() * 14,
+        railHold: 2 + r() * 4,
+        preyId: -1,
+        lastPrey: -1,
+        preyT: 0,
+        pushT: r(),
+        roam: null,
+        roamT: 0,
+        lastPos: { ...c.pos },
+        stillT: 0,
+        detourT: 0,
+        detour: null,
+        yankSeat: -1,
+        react: 0.2 + r() * 0.5
+      };
+      this.mem.set(c.id, m);
     }
-    if (best) break;
+    return m;
   }
-  return best ? { pos: best, dist: bestD } : null;
-}
 
-/** 推挤方向是角色朝向；朝向偏离目标超过这个角度就先转身再推，不然推空。 */
-const AIM_TOLERANCE = 0.45;
-
-/**
- * 贴近目标后：朝向对准了且能推就推；没对准就朝目标迈一步把身子转过来。
- * 冷却中就原地站着，不再一直往人身上顶（顶不动会被算成"想走走不动"）。
- */
-function engage(char: CharacterState, target: Vec2, canPush: boolean): { move: Vec2; push: boolean } {
-  const want = Math.atan2(target.x - char.pos.x, target.z - char.pos.z);
-  let diff = want - char.facing;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  if (!canPush) return { move: V2(), push: false };
-  if (Math.abs(diff) > AIM_TOLERANCE) return { move: v2Norm(v2Sub(target, char.pos)), push: false };
-  return { move: V2(), push: true };
-}
-
-/**
- * 坏心眼的一步：挑目标 → 绕到他内侧 → 朝门的方向推。没有合适目标返回 null（照常做别的事）。
- * 目标只挑站着、没抓扶手的 bot：抓着扶手的人只吃 30% 推力，推不出去；玩家不挑（见 BULLY_BOTS）。
- */
-function bully(
-  char: CharacterState, ctx: BotContext, doors: Vec2[], m: BotMemory, rnd: () => number
-): InputFrame | null {
-  let victim: CharacterState | null = null;
-  let door = V2();
-  let best = BULLY_RANGE;
-  for (const o of ctx.characters) {
-    if (o.id === char.id || !o.alive || o.seatId !== null || o.grabHandrail !== null) continue;
-    if (o.isPlayer) continue;
-    for (const d of doors) {
-      const x = v2Dist(o.pos, d);
-      if (x < best) { best = x; victim = o; door = d; }
+  /** 单个机器人的决策：返回本帧输入。 */
+  decide(c: CharacterState, v: BotView, dt: number): InputFrame {
+    const m = this.m(c);
+    m.pushT -= dt;
+    m.preyT += dt;
+    m.roamT -= dt;
+    m.detourT -= dt;
+    if (!c.alive || c.status === 'down' || c.status === 'carried' || c.status === 'thrown') {
+      m.preyId = -1;
+      return NONE;
     }
+    if (v.isSeatMoving(c.id)) return NONE;
+    let alive = 0;
+    for (const o of v.characters) if (o.alive) alive++;
+    this.endgame = alive <= ENDGAME_ALIVE;
+    if (v.phase === 'finale' && this.finaleAlive < 0) this.finaleAlive = alive;
+    this.wild = alive <= WILD_ALIVE || (v.phase === 'finale' && this.finaleAlive <= WILD_FINALE_ALIVE);
+    const out = this.decideInner(c, v, m, dt);
+    this.trackStuck(c, v, m, out, dt);
+    return out;
   }
-  if (!victim) return null;
-  const buttons = new Set<Button>();
-  if (char.grabHandrail !== null) return { move: V2(), buttons: btnSet('interact') };
-  const out = v2Norm(v2Sub(door, victim.pos));
-  const toVictim = v2Sub(victim.pos, char.pos);
-  const dist = v2Len(toVictim);
-  const lined = dist > 1e-3 && (toVictim.x * out.x + toVictim.z * out.z) / dist > 0.5;
-  // 还没站到他内侧：绕过去（寻路会绕开立杆和人堆）。
-  if (!(lined && dist <= BALANCE.pushRange * 0.95)) {
-    const spot = V2(victim.pos.x - out.x * 1.05, victim.pos.z - out.z * 1.05);
-    return { move: go(char, ctx, spot), buttons };
-  }
-  // 站好了：对准就推；推挤冷却中就用身体往门那边顶。
-  // （试过冷却中冲刺顶人：冲刺把自己也带到门边，掉车数反而降了，不用。）
-  if (char.pushCd <= 0 && m.pushTimer <= 0) {
-    const e = engage(char, victim.pos, true);
-    if (e.push && playerInPushCone(char, ctx)) {
-      // 推挤是扇形范围，玩家站在旁边会被一起推出去：等他走开再推。
-      return { move: V2(), buttons };
+
+  private decideInner(c: CharacterState, v: BotView, m: Mem, dt: number): InputFrame {
+    if (m.preyId >= 0) m.lastPrey = m.preyId;
+    m.preyId = c.hold?.kind === 'char' ? c.hold.id : -1;
+    if (v.phase === 'boarding' || v.phase === 'ignition') return this.board(c, v, m);
+
+    // 1) 被人扯住：反应一下就按"推"挣脱。
+    if (c.heldBy !== null && c.seatId === null) {
+      m.struggle -= dt;
+      if (m.struggle <= 0) {
+        m.struggle = 0.25 + this.rnd() * 0.45;
+        return frame(V2(), PRESS_PUSH);
+      }
+      return NONE;
     }
-    if (e.push) {
-      buttons.add('push');
-      m.pushTimer = 0.4 + rnd() * 0.5;
-      return { move: V2(), buttons };
+    m.struggle = Math.min(m.struggle, 0.25 + this.rnd() * 0.45);
+
+    // 2) 坐着。
+    if (c.seatId !== null) return this.sitting(c, v, m, dt);
+
+    // 3) 手里抓着人。
+    if (c.hold?.kind === 'char') return this.holding(c, v, m);
+
+    const doors = v.openDoors();
+    const hazard = v.event;
+
+    // 4) 机关预警 / 生效中：抓扶手（或坐下）。
+    if (hazard) {
+      if (c.hold?.kind === 'rail') return frame(V2(), EMPTY, HELD_GRAB);
+      const g = this.braceFor(c, v, 2.4);
+      if (g) return g;
     }
-    return { move: e.move, buttons };
-  }
-  return { move: v2Norm(toVictim), buttons };
-}
 
-/** 单个机器人的决策：返回本帧输入。 */
-export function decideBot(
-  char: CharacterState,
-  ctx: BotContext,
-  rnd: () => number,
-  dt: number
-): InputFrame {
-  const m = mem(char.id);
-  const buttons = new Set<Button>();
-  let move = V2();
+    // 5) 抓着扶手。
+    if (c.hold?.kind === 'rail') return this.onRail(c, v, m, doors, dt);
 
-  if (ctx.phase === 'boarding') {
-    // 站台上直走到门口，进了车厢各去各的站位（交给寻路），到了就站住。
-    // 以前按 id%4 分 4 条通道，7 个 bot 两两共用一个点，后到的一直顶着先到的走不动。
-    if (char.pos.x > 3.1) return { move: v2Norm(v2Sub(V2(2.9, -5.5), char.pos)), buttons };
-    const spot = BOARD_SPOTS[(char.id - 1 + BOARD_SPOTS.length) % BOARD_SPOTS.length];
-    // 差不多到了就站住：站位附近有人时硬挤进去只会原地顶着。
-    if (v2Dist(char.pos, spot) < 0.6) return { move: V2(), buttons };
-    return { move: go(char, ctx, spot), buttons };
-  }
-
-  const doors = openDoorPoints(ctx.layout);
-  const myDoorDist = nearestDist(char.pos, doors);
-  const crowdT = ctx.crowd / BALANCE.crowdMax;
-
-  m.grabTimer -= dt;
-  m.pushTimer -= dt;
-  m.skillTimer -= dt;
-  m.timer -= dt;
-
-  // 1) 自己危险：先抓扶手，抓不到就逃离门口。反应有延迟，不是瞬间闪避。
-  // 胆大的要被挤到门边（1.0 以内）才慌，站在门口黄圈内侧刷分时不慌。
-  const brave = BRAVE_BOTS.has(char.id);
-  if (myDoorDist < (brave ? BRAVE_PANIC_DIST : 1.7)) {
-    m.panic -= dt;
-    if (m.panic <= 0) {
-      const r = pickRail(char, ctx);
-      if (char.grabHandrail !== null) {
-        move = V2();
-      } else if (r && r.dist < BALANCE.handrailGrabRange * 0.9) {
-        buttons.add('interact');
-      } else if (r && r.dist < 2.2) {
-        move = go(char, ctx, r.pos);
+    // 6) 门开着（或马上要开）：猎手去门口找人下手，其余的躲。
+    const huntDoors = doors.length ? doors : v.pendingDoor ? [v.pendingDoor] : [];
+    if (huntDoors.length) {
+      if (m.aggr >= HUNTER || this.wild) {
+        const f = this.hunt(c, v, m, huntDoors);
+        if (f) return f;
       } else {
-        move = v2Norm(V2(-1, (rnd() - 0.5) * 0.5));
-        if (char.dashCd <= 0 && myDoorDist < 1.1) buttons.add('dash');
+        m.preyId = -1;
       }
-      return { move, buttons };
+      return this.hide(c, v, huntDoors);
     }
-  } else {
-    m.panic = 0.25 + rnd() * 0.5;
+    m.preyId = -1;
+
+    // 7) 门关着：找座 / 拽座 / 抓扶手 / 闲逛，顺手推人。
+    return this.cruise(c, v, m);
   }
 
-  // 1.2) 坏心眼的：车门开着时，把离门最近的人往门外推。
-  if (BULLY_BOTS.has(char.id) && char.seatId === null && doors.length
-    && (ctx.phase === 'driving' || ctx.phase === 'finale')) {
-    const b = bully(char, ctx, doors, m, rnd);
-    if (b) return b;
+  // ---------------- 各种情形 ----------------
+
+  private board(c: CharacterState, v: BotView, m: Mem): InputFrame {
+    // 站台上直走到门口；进了车厢，爱坐的直接去抢座，其余的去各自的站位。
+    if (c.pos.x > 2.6) return frame(v2Norm(v2Sub(V2(1.8, -4.3), c.pos)));
+    if (m.seatLover) {
+      const s = this.seatPlan(c, v);
+      if (s) return s;
+    }
+    const spot = BOARD_SPOTS[(c.id - 1 + BOARD_SPOTS.length) % BOARD_SPOTS.length];
+    if (v2Dist(c.pos, spot) < 0.5) return NONE;
+    return frame(this.go(c, v, spot));
   }
 
-  // 1.5) 胆大的：到站开门、黄圈正好贴在门口时，优先去门口刷分（到了就站住）。
-  // 这是热区设计本来的意图 ——"敢不敢去门口刷分"。以前所有 bot 离门 1.9 以内都不进圈，
-  // 开门的 27 秒里 7 个 bot 在门口 1.5m 内合计只待 2 人·秒，推人出门的打法根本没有目标。
-  if (brave && char.seatId === null && doors.length && ctx.phase === 'driving'
-    && nearestDist(ctx.hotZone.pos, doors) < 1.6) {
-    if (char.grabHandrail !== null) return { move: V2(), buttons: btnSet('interact') };
-    if (v2Dist(char.pos, ctx.hotZone.pos) > ctx.hotZone.radius * 0.8) {
-      return { move: go(char, ctx, ctx.hotZone.pos), buttons };
+  private sitting(c: CharacterState, v: BotView, m: Mem, dt: number): InputFrame {
+    m.seatHold -= dt;
+    if (c.heldBy !== null) return NONE; // 被拽着起不来
+    // 坐够了起身；猎手在开门时看到附近有躺着的人也会起身。
+    let wantUp = m.seatHold <= 0;
+    // 杀红了眼：门开着就起身去抢最后的位置（不然最后两个人各坐一个座位熬到终点）。
+    if (this.wild && v.openDoors().length && m.react <= 0) wantUp = true;
+    m.react = this.wild && v.openDoors().length ? m.react - dt : 0.2 + this.rnd() * 0.6;
+    if (!wantUp && m.aggr > 0.75 && v.openDoors().length) {
+      wantUp = v.characters.some((o) => o.alive && o.id !== c.id && o.status === 'down'
+        && v2Dist(o.pos, c.pos) < 3 && !v.grabImmune(o.id));
     }
-    return { move: V2(), buttons };
+    if (wantUp) {
+      m.seatHold = 8 + this.rnd() * 14;
+      return frame(V2(), PRESS_GRAB);
+    }
+    return NONE;
   }
 
-  // 2) 座位：主要产出源，优先级仅次于保命。
-  if (ctx.phase !== 'finale') {
-    if (char.seatId !== null) {
-      m.seatHold -= dt;
-      // "坐够了"就起身，让座位在整局里有轮换。
-      // 以前还有一条"稳定度 < 0.36 就主动让座"：那是推不起来时代（E1 之前）的补丁，
-      // 现在连推三下一定能拽起，它反而让 bot 被推两下就让座 —— 玩家要推三下、bot 只要两下，
-      // 规则不一致，还让"守着座位旁边连推"变成刷分点。
-      if (m.seatHold <= 0) {
-        m.seatHold = SEAT_HOLD_MIN + rnd() * SEAT_HOLD_SPREAD;
-        return { move: V2(), buttons: btnSet('interact') };
+  /** 抓着人：拖着摔倒的人去门口扔；拽座时稳住；扯住站着的人就强推。 */
+  private holding(c: CharacterState, v: BotView, m: Mem): InputFrame {
+    const t = v.characters[c.hold!.id];
+    if (t.status === 'carried') {
+      if (v.throwWouldExit(c.id)) return frame(V2(), PRESS_PUSH, HELD_GRAB);
+      const doors = v.openDoors();
+      const cands = doors.length ? doors : v.pendingDoor ? [v.pendingDoor] : [];
+      const door = this.nearestDoor(c.pos, cands, v);
+      if (door) {
+        const plan = carryToDoor(c, door, v, doors.length > 0);
+        return frame(plan ?? this.go(c, v, carryStage(door, v)), EMPTY, HELD_GRAB);
       }
-      return { move: V2(), buttons };
+      // 没门可扔：前面有人就砸过去，快挣脱了也扔出去（落地再瘫一会儿）。
+      const f = facingVec(c.facing);
+      const inFront = v.characters.some((o) => o.alive && o.id !== c.id && o.id !== t.id && o.seatId === null
+        && o.status !== 'thrown' && (() => {
+          const to = v2Sub(o.pos, t.pos);
+          const d = v2Len(to);
+          return d < 3 && d > 0.3 && (to.x * f.x + to.z * f.z) / d > 0.85;
+        })());
+      if (inFront || t.downTimer <= 0) return frame(V2(), PRESS_PUSH, HELD_GRAB);
+      return frame(V2(), EMPTY, HELD_GRAB);
     }
-    if (char.sitLockTimer <= 0 && m.seatHold > 0.5 && ctx.time >= m.seatAfter) {
-      let target: Seat | null = null;
-      let bestD = Infinity;
-      for (const st of ctx.layout.seats) {
-        if (!ctx.seatFree(st.id)) continue;
-        // 空座前沿已经站着别人、而且他马上就能坐：去了也只能顶着他，换一个。
-        // 刚被拽起来的人（锁定期内坐不下）不算 —— 否则被拽起的人站在自己座位前，
-        // bot 全都绕开，锁一过他又坐回去，"拽座"等于白拽。
-        const front = seatFrontPoint(st, char.radius);
-        if (ctx.characters.some((o) => o.id !== char.id && o.alive && o.seatId === null && o.sitLockTimer <= 0
-          && v2Dist(o.pos, front) < 0.6)
-          && distToRect(char.pos, st.cushion) > SEAT.reachEdge) continue;
-        const d = v2Dist(char.pos, st);
-        if (d < bestD) { bestD = d; target = st; }
+    if (t.seatId !== null || v.isSeatMoving(t.id)) {
+      // 拽座：对着他、别松手。
+      return frame(v2Scale(v2Norm(v2Sub(t.pos, c.pos)), 0.05), EMPTY, HELD_GRAB);
+    }
+    // 扯住站着的人。门关着时爱坐的拽起人来是为了抢座：松手，座位一空就坐上去。
+    if (m.yankSeat >= 0 && v.openDoors().length === 0) {
+      m.yankSeat = -1;
+      return NONE;
+    }
+    m.yankSeat = -1;
+    if (aimCos(c, t.pos) > 0.6 && c.pushCd <= 0) return frame(V2(), PRESS_PUSH, HELD_GRAB);
+    return frame(v2Scale(v2Norm(v2Sub(t.pos, c.pos)), 0.3), EMPTY, HELD_GRAB);
+  }
+
+  /** 抓着扶手：什么时候继续抓、什么时候松手；抓着也能推身边的人。 */
+  private onRail(c: CharacterState, v: BotView, m: Mem, doors: Door[], dt: number): InputFrame {
+    m.railHold -= dt;
+    const danger = doors.length > 0 || v.pendingDoor !== null || v.event !== null || v.timeToDoors < 1.5;
+    const hunter = m.aggr >= HUNTER || this.wild;
+    // 开门时：身边有人正好在门和我之间，推他一把（抓着扶手也能推）。
+    if (doors.length && c.pushCd <= 0 && m.pushT <= 0) {
+      const t = this.pushable(c, v, doors);
+      if (t) {
+        m.pushT = 0.3 + this.rnd() * 0.5;
+        if (aimCos(c, t.pos) > 0.7) return frame(V2(), PRESS_PUSH, HELD_GRAB);
+        return frame(v2Scale(v2Norm(v2Sub(t.pos, c.pos)), 0.15), EMPTY, HELD_GRAB);
       }
-      if (target) {
-        // 座垫是实心的：走到座垫前沿、贴上就坐（判定口径与模拟一致：到座垫边缘）。
-        if (distToRect(char.pos, target.cushion) < SEAT.reachEdge * 0.9) {
-          return { move: V2(), buttons: btnSet('interact') };
-        }
-        if (bestD < 5.5) return { move: go(char, ctx, seatFrontPoint(target, char.radius)), buttons };
-      } else {
-        // 没空座就去把坐着的人拽起来 —— 这是"抢座"真正发生的地方。
+    }
+    // 猎手：门开着、附近有能下手的，就松手去打。
+    if (hunter && doors.length && v.event === null) {
+      const prey = this.pickPrey(c, v, m, doors);
+      if (prey && v2Dist(prey.pos, c.pos) < 4.5
+        && (prey.status === 'down' || prey.balance < 0.75 || prey.seatId !== null || this.wild)) return NONE;
+    }
+    if (danger || m.railHold > 0) return frame(V2(), EMPTY, HELD_GRAB);
+    m.railHold = 2 + this.rnd() * 5;
+    return NONE; // 松手
+  }
+
+  /** 门口找人下手。没有合适的猎物返回 null。 */
+  private hunt(c: CharacterState, v: BotView, m: Mem, doors: Door[]): InputFrame | null {
+    const prey = this.pickPrey(c, v, m, doors);
+    if (!prey) {
+      m.preyId = -1;
+      return null;
+    }
+    if (prey.id !== m.lastPrey) m.preyT = 0;
+    m.preyId = prey.id;
+    const d = v2Dist(prey.pos, c.pos);
+    const pv = v.grabPreview(c.id);
+    // 摔倒的：抓起来。
+    if (prey.status === 'down') {
+      if (pv.kind === 'char' && pv.id === prey.id) return frame(V2(), PRESS_GRAB, HELD_GRAB);
+      if (d < c.radius + prey.radius + 0.5) return frame(v2Scale(v2Norm(v2Sub(prey.pos, c.pos)), 0.2));
+      return frame(this.go(c, v, prey.pos));
+    }
+    // 坐着的：走到他座位跟前，抓住不放拽起来。
+    if (prey.seatId !== null) {
+      if (pv.kind === 'char' && pv.id === prey.id) return frame(V2(), PRESS_GRAB, HELD_GRAB);
+      const ap = v.seatApproach(prey.seatId);
+      if (v2Dist(c.pos, ap) > 0.35) return frame(this.go(c, v, ap));
+      return frame(v2Scale(v2Norm(v2Sub(prey.pos, c.pos)), 0.2));
+    }
+    // 站着的：离门近、没抓扶手 → 绕到他靠车厢内侧的一边往门外推；
+    // 抓着扶手或离门远 → 推哪边都行，先把他推晕（平衡快没了就抓住强推，推倒直接拖走）。
+    const door = this.nearestDoor(prey.pos, doors, v)!;
+    const exit = V2(v.layout.interior.maxX + 1, doorCenterZ(door));
+    const out = v2Norm(v2Sub(exit, prey.pos));
+    const ringOut = prey.hold?.kind !== 'rail' && v2Dist(prey.pos, this.doorInner(door, v)) < 2.6;
+    const gap = c.radius + prey.radius + 0.12;
+    const spot = ringOut ? V2(prey.pos.x - out.x * gap, prey.pos.z - out.z * gap) : prey.pos;
+    const toPrey = v2Norm(v2Sub(prey.pos, c.pos));
+    const lined = !ringOut || (d > 1e-3 && toPrey.x * out.x + toPrey.z * out.z > 0.45);
+    const reach = c.radius + prey.radius + BALANCE.pushReach;
+    if (lined && d <= reach) {
+      if (aimCos(c, prey.pos) < 0.8) return frame(v2Scale(toPrey, 0.15));
+      if (m.pushT > 0) return NONE;
+      const strongKills = prey.balance <= BALANCE.pushBalance * BALANCE.strongPushMul * (prey.hold?.kind === 'rail' ? 0.5 : 1);
+      if (strongKills && pv.kind === 'char' && pv.id === prey.id && prey.heldBy === null) {
+        m.pushT = 0.1;
+        return frame(V2(), PRESS_GRAB, HELD_GRAB);
+      }
+      if (c.pushCd <= 0) {
+        m.pushT = 0.05 + this.rnd() * 0.2;
+        return frame(V2(), PRESS_PUSH);
+      }
+      return NONE;
+    }
+    // 远一点、对得准：冲过去撞一下。
+    if (lined && d < 2.6 && d > reach && c.dashCd <= 0 && aimCos(c, prey.pos) > 0.9 && (m.aggr > 0.7 || this.endgame)) {
+      return frame(toPrey, PRESS_DASH);
+    }
+    return frame(this.go(c, v, spot));
+  }
+
+  /** 开门时不想打的：去离门远的扶手或空座。 */
+  private hide(c: CharacterState, v: BotView, doors: Door[]): InputFrame {
+    const s = this.seatPlan(c, v, 4);
+    if (s) return s;
+    const g = this.braceFor(c, v, 8, doors);
+    if (g) return g;
+    // 没地方抓：往远离门的那侧挪。
+    const away = V2(-1.3, Math.max(-2.5, Math.min(2.5, c.pos.z)));
+    if (v2Dist(c.pos, away) < 0.6) return NONE;
+    return frame(this.go(c, v, away));
+  }
+
+  /** 门关着的时候。 */
+  private cruise(c: CharacterState, v: BotView, m: Mem): InputFrame {
+    if (m.seatLover) {
+      const s = this.seatPlan(c, v);
+      if (s) return s;
+      // 没空座：去拽一个坐着的人（不拽路人）。
+      if (m.aggr > 0.45) {
         let victim: CharacterState | null = null;
-        let vd = Infinity;
-        for (const o of ctx.characters) {
-          if (o.id === char.id || !o.alive || o.seatId === null) continue;
-          const d = v2Dist(o.pos, char.pos);
+        let vd = 7;
+        for (const o of v.characters) {
+          if (!o.alive || o.id === c.id || o.seatId === null || o.heldBy !== null) continue;
+          if (o.isPlayer && this.playerHunters(c.id) >= MAX_PLAYER_HUNTERS) continue;
+          const d = v2Dist(o.pos, c.pos);
           if (d < vd) { vd = d; victim = o; }
         }
-        if (victim && vd < SEAT_ATTACK_RANGE) {
-          if (vd <= BALANCE.pushRange * 0.92) {
-            const e = engage(char, victim.pos, char.pushCd <= 0);
-            if (e.push) buttons.add('push');
-            return { move: e.move, buttons };
+        if (victim) {
+          const pv = v.grabPreview(c.id);
+          if (pv.kind === 'char' && pv.id === victim.id) {
+            m.yankSeat = victim.seatId!;
+            return frame(V2(), PRESS_GRAB, HELD_GRAB);
           }
-          // 坐着的人在座垫里，寻路会把目标投影到座垫前沿。
-          return { move: go(char, ctx, victim.pos), buttons };
+          m.preyId = victim.id;
+          const ap = v.seatApproach(victim.seatId!);
+          if (v2Dist(c.pos, ap) > 0.35) return frame(this.go(c, v, ap));
+          return frame(v2Scale(v2Norm(v2Sub(victim.pos, c.pos)), 0.2));
         }
       }
     }
-  }
-
-  // 3) 事件预警 / 高拥挤 / 终局：抓扶手。
-  const wantGrab =
-    (ctx.event !== null && ctx.event.warnRemaining > 0) ||
-    ctx.phase === 'finale' ||
-    crowdT > 0.75;
-  if (wantGrab && char.grabHandrail === null) {
-    const r = pickRail(char, ctx);
-    if (r) {
-      if (r.dist < BALANCE.handrailGrabRange * 0.9) {
-        if (ctx.layout.handrails.some((h) => ctx.railFree(h.id) && v2Dist(char.pos, h) < BALANCE.handrailGrabRange)) {
-          buttons.add('interact');
-        }
-      } else {
-        move = go(char, ctx, r.pos);
-        return { move, buttons };
+    // 快到站了：猎手往车厢中部靠，其余的去抓扶手。
+    if (v.timeToDoors < 2.5) {
+      if (m.aggr < HUNTER) {
+        const g = this.braceFor(c, v, 6);
+        if (g) return g;
       }
     }
-  } else if (!wantGrab && char.grabHandrail !== null && m.grabTimer <= 0) {
-    // 平时别一直挂在扶手上，不然整局没人动。
-    buttons.add('interact');
-    m.grabTimer = 3 + rnd() * 4;
-  }
-
-  // 3.5) 没座位就去热区刷分。没有这一条，没抢到座的 AI 会整局在车厢里瞎逛。
-  if (char.seatId === null && (ctx.phase === 'driving' || ctx.phase === 'finale')) {
-    const zd = v2Dist(char.pos, ctx.hotZone.pos);
-    // 已经在圈里（90% 半径内）就不再往圈心挤：圈里有人时硬挤只会原地顶着。
-    if (zd > ctx.hotZone.radius * 0.9 && zd < 6.5 && myDoorDist > 1.9) {
-      return { move: go(char, ctx, ctx.hotZone.pos), buttons };
-    }
-  }
-
-  // 4) 进攻：优先挑“已经比我更靠近门”的对手，把他往门那边顶。
-  let prey: CharacterState | null = null;
-  let preyScore = -Infinity;
-  for (const o of ctx.characters) {
-    if (o.id === char.id || !o.alive) continue;
-    const d = v2Dist(o.pos, char.pos);
-    if (d > 3.2) continue;
-    const theirDoorDist = nearestDist(o.pos, doors);
-    // 对手离门越近、离我越近，越值得推。
-    const score = (theirDoorDist < myDoorDist ? 2.2 : 0) + 3 / Math.max(0.4, d) - theirDoorDist * 0.25;
-    if (score > preyScore) {
-      preyScore = score;
-      prey = o;
-    }
-  }
-
-  if (prey && doors.length > 0) {
-    const d = v2Dist(prey.pos, char.pos);
-    // 贴身时用身体往门那边顶（碰撞会把对方挤过去），这是挤人的主要方式，保留。
-    move = go(char, ctx, prey.pos);
-    if (d <= BALANCE.pushRange * 0.92 && char.pushCd <= 0 && m.pushTimer <= 0) {
-      const e = engage(char, prey.pos, true);
-      if (e.push) {
-        buttons.add('push');
-        m.pushTimer = 0.7 + rnd() * 1.1;
-      } else {
-        move = e.move;
+    // 顺手推一把身边的人（先把他推晕，开门时好下手）。
+    if (m.aggr > 0.55 && c.pushCd <= 0 && m.pushT <= 0) {
+      m.pushT = 1.0 + this.rnd() * 1.6;
+      const near = v.characters.find((o) => o.alive && o.id !== c.id && o.seatId === null && o.status !== 'thrown'
+        && o.status !== 'carried' && v2Dist(o.pos, c.pos) < c.radius + o.radius + BALANCE.pushReach
+        && !(o.isPlayer && this.playerHunters(c.id) >= MAX_PLAYER_HUNTERS));
+      if (near && this.rnd() < 0.6) {
+        if (aimCos(c, near.pos) > 0.6) return frame(V2(), PRESS_PUSH);
+        return frame(v2Scale(v2Norm(v2Sub(near.pos, c.pos)), 0.2));
       }
     }
-    if (char.skillCd <= 0 && m.skillTimer <= 0 && d < 2.4 && ctx.canUseSkill(char.id)) {
-      buttons.add('skill');
-      m.skillTimer = 5 + rnd() * 5;
+    // 平时：有一半时间去抓个扶手站着，其余时间闲逛。
+    if (m.railHold > 0 && m.aggr < 0.8) {
+      const g = this.braceFor(c, v, 5);
+      if (g) return g;
     }
-    return { move, buttons };
-  }
-
-  // 4) 没门开着 / 没目标：在车厢里闲逛，顺手推一把身边的人。
-  if (!m.target || m.timer <= 0 || v2Dist(char.pos, m.target) < 0.6) {
-    m.target = randomInteriorTarget(ctx.layout, rnd);
-    m.timer = 1.6 + rnd() * 2.4;
-  }
-  move = go(char, ctx, m.target);
-  // 闲逛目标落在障碍里时寻路会停在它旁边：到了就换个目标，而不是原地发呆。
-  if (v2Len(move) < 0.05) {
-    m.target = randomInteriorTarget(ctx.layout, rnd);
-    m.timer = 1.6 + rnd() * 2.4;
-    move = go(char, ctx, m.target);
-  }
-
-  if (m.pushTimer <= 0 && char.pushCd <= 0) {
-    const near = ctx.characters.find(
-      (o) => o.id !== char.id && o.alive && v2Dist(o.pos, char.pos) < BALANCE.pushRange * 0.9
-    );
-    if (near && rnd() < 0.7) {
-      move = v2Norm(v2Sub(near.pos, char.pos));
-      buttons.add('push');
+    if (!m.roam || m.roamT <= 0 || v2Dist(c.pos, m.roam) < 0.5) {
+      m.roam = this.randomSpot(v);
+      m.roamT = 2 + this.rnd() * 3;
     }
-    m.pushTimer = 1.2 + rnd() * 1.8;
-  }
-  if (m.skillTimer <= 0 && char.skillCd <= 0 && ctx.canUseSkill(char.id)) {
-    buttons.add('skill');
-    m.skillTimer = 6 + rnd() * 6;
+    const dir = this.go(c, v, m.roam);
+    if (v2Len(dir) < 0.05) {
+      m.roam = this.randomSpot(v);
+      return frame(this.go(c, v, m.roam));
+    }
+    return frame(v2Scale(dir, 0.6));
   }
 
-  return { move, buttons };
-}
+  // ---------------- 小工具 ----------------
 
-export function resetAiMemory(rnd?: () => number) {
-  memory.clear();
-  memRnd = rnd ?? Math.random;
+  /** 去一个空座坐下（maxDist 以内），按"抓"的时机和模拟同一口径。没有返回 null。 */
+  private seatPlan(c: CharacterState, v: BotView, maxDist = 7): InputFrame | null {
+    if (v.canSit(c.id)) {
+      const pv = v.grabPreview(c.id);
+      if (pv.kind === 'seat') return frame(V2(), PRESS_GRAB);
+    }
+    let best = -1;
+    let bd = maxDist;
+    for (const s of v.layout.seats) {
+      if (!v.seatFree(s.id)) continue;
+      const ap = v.seatApproach(s.id);
+      // 接近点已经站着别人（且不是我）：去了也只能顶着，换一个。
+      if (v.characters.some((o) => o.id !== c.id && o.alive && o.seatId === null && v2Dist(o.pos, ap) < 0.5)) continue;
+      if (v.npcs.some((n) => v2Dist(n.pos, ap) < 0.6)) continue;
+      const d = v2Dist(c.pos, ap);
+      if (d < bd) { bd = d; best = s.id; }
+    }
+    if (best < 0) return null;
+    const ap = v.seatApproach(best);
+    if (v2Dist(c.pos, ap) < 0.2) {
+      const seat = v.layout.seats[best];
+      return frame(v2Scale(v2Norm(v2Sub(V2(seat.x, seat.z), c.pos)), 0.3));
+    }
+    return frame(this.go(c, v, ap));
+  }
+
+  /**
+   * 找扶手抓稳（机关、开门时）：够得着就按"抓"（预览必须是扶手或座位，别抓成人），
+   * 否则走过去。avoid 给出时优先挑离这些门远的扶手。
+   */
+  private braceFor(c: CharacterState, v: BotView, maxDist: number, avoid: Door[] = []): InputFrame | null {
+    const pv = v.grabPreview(c.id);
+    if (pv.kind === 'rail' || pv.kind === 'seat') {
+      if (avoid.length === 0 || pv.kind === 'seat' || this.doorDist(v.layout.handrails[pv.id], avoid, v) > 2.2) {
+        return frame(V2(), PRESS_GRAB, HELD_GRAB);
+      }
+    }
+    let best: Vec2 | null = null;
+    let bs = Infinity;
+    for (const h of v.layout.handrails) {
+      if (!v.railFree(h.id, c.id)) continue;
+      const d = v2Dist(c.pos, h);
+      if (d > maxDist) continue;
+      const dd = avoid.length ? this.doorDist(h, avoid, v) : 9;
+      if (avoid.length && dd < 2.2) continue;
+      const score = d - Math.min(dd, 4) * 0.4;
+      if (score < bs) { bs = score; best = V2(h.x, h.z); }
+    }
+    if (!best) return null;
+    if (v2Dist(c.pos, best) < BALANCE.railReach * 0.85) {
+      // 够得着但预览不是扶手（前面有人/有座位优先）：侧身挪一下再抓。
+      return frame(v2Scale(v2Norm(v2Sub(best, c.pos)), 0.2), EMPTY, EMPTY);
+    }
+    return frame(this.go(c, v, best));
+  }
+
+  /** 开门时身边能往门外推的人（我在他内侧、推的方向朝门）。 */
+  private pushable(c: CharacterState, v: BotView, doors: Door[]): CharacterState | null {
+    for (const o of v.characters) {
+      if (!o.alive || o.id === c.id || o.seatId !== null || o.status === 'thrown' || o.status === 'carried') continue;
+      if (o.isPlayer && this.playerHunters(c.id) >= MAX_PLAYER_HUNTERS && this.m(c).lastPrey !== o.id) continue;
+      const d = v2Dist(o.pos, c.pos);
+      if (d > c.radius + o.radius + BALANCE.pushReach) continue;
+      const door = this.nearestDoor(o.pos, doors, v)!;
+      if (v2Dist(o.pos, this.doorInner(door, v)) > 2.6) continue;
+      const out = v2Norm(v2Sub(V2(v.layout.interior.maxX + 1, doorCenterZ(door)), o.pos));
+      const to = v2Norm(v2Sub(o.pos, c.pos));
+      if (to.x * out.x + to.z * out.z > 0.4) return o;
+    }
+    return null;
+  }
+
+  /** 挑猎物：躺着的 > 门口站着的（平衡越低越好）> 门口附近坐着的（拽起来）。 */
+  private pickPrey(c: CharacterState, v: BotView, m: Mem, doors: Door[]): CharacterState | null {
+    let best: CharacterState | null = null;
+    let bs = 0;
+    const hunters = this.playerHunters(c.id);
+    for (const o of v.characters) {
+      if (!o.alive || o.id === c.id || o.status === 'thrown' || o.status === 'carried') continue;
+      if (v.isSeatMoving(o.id)) continue;
+      if (o.heldBy !== null) continue;
+      if (o.isPlayer && hunters >= MAX_PLAYER_HUNTERS && m.lastPrey !== o.id) continue;
+      const d = v2Dist(o.pos, c.pos);
+      if (d > (this.wild ? 14 : 7)) continue;
+      const door = this.nearestDoor(o.pos, doors, v)!;
+      const dd = v2Dist(o.pos, this.doorInner(door, v));
+      let s: number;
+      if (o.status === 'down') {
+        if (v.grabImmune(o.id)) continue;
+        s = 12 - dd * 1.1 - d * 0.8;
+      } else if (o.seatId !== null) {
+        s = (dd < 4.5 || this.wild ? 5.5 : 1.5) - dd * 0.5 - d * 0.5;
+      } else {
+        const railPenalty = this.endgame ? 0 : this.wild ? 0.8 : 2.5;
+        s = 7 - dd * 1.2 - d * 0.5 + (1 - o.balance) * 4 - (o.hold?.kind === 'rail' ? railPenalty : 0);
+      }
+      if (o.id === m.lastPrey) s += 2.5; // 盯住一个，别左右横跳
+      // 围攻：已经有别的机器人在打他，一起上（抓扶手的人一个人推不倒）。
+      for (const [id, mm] of this.mem) if (id !== c.id && mm.preyId === o.id) s += 1.0;
+      if (s > bs) { bs = s; best = o; }
+    }
+    return best;
+  }
+
+  /** 此刻盯着玩家的机器人数（不含自己）。 */
+  private playerHunters(selfId: number): number {
+    let n = 0;
+    for (const [id, mm] of this.mem) if (id !== selfId && mm.preyId === 0) n++;
+    return n;
+  }
+
+  private doorInner(d: Door, v: BotView): Vec2 {
+    return V2(v.layout.interior.maxX - 0.75, doorCenterZ(d));
+  }
+
+  private doorDist(p: Vec2, doors: Door[], v: BotView): number {
+    let best = Infinity;
+    for (const d of doors) best = Math.min(best, v2Dist(p, this.doorInner(d, v)));
+    return best;
+  }
+
+  private nearestDoor(p: Vec2, doors: Door[], v: BotView): Door | null {
+    let best: Door | null = null;
+    let bd = Infinity;
+    for (const d of doors) {
+      const x = v2Dist(p, this.doorInner(d, v));
+      if (x < bd) { bd = x; best = d; }
+    }
+    return best;
+  }
+
+  private randomSpot(v: BotView): Vec2 {
+    const r = v.layout.interior;
+    for (let i = 0; i < 8; i++) {
+      const p = V2(r.minX + 1.0 + this.rnd() * (r.maxX - r.minX - 2.2), r.minZ + 1.5 + this.rnd() * (r.maxZ - r.minZ - 3));
+      if (v.nav.isFree(p)) return p;
+    }
+    return V2(0.8, -1.0);
+  }
+
+  /** 去某个点：交给寻路（绕立杆/座垫/障碍物/站着的路人）。反卡死期间先绕一下。 */
+  private go(c: CharacterState, v: BotView, target: Vec2): Vec2 {
+    const m = this.m(c);
+    if (m.detourT > 0 && m.detour) {
+      const dir = v.nav.steer(c.id, c.pos, m.detour, v.time).dir;
+      if (v2Len(dir) > 0.05) return dir;
+    }
+    return v.nav.steer(c.id, c.pos, target, v.time).dir;
+  }
+
+  /**
+   * 反卡死：想走（输入 > 0.5）却 1 秒内没离开起点 0.25，就换一个临时目标绕一下、放下当前猎物。
+   * 按"离开起点多远"算而不是逐帧比较：贴着立杆来回蹭的人每帧都在动，但一直没走出去。
+   */
+  private trackStuck(c: CharacterState, v: BotView, m: Mem, f: InputFrame, dt: number) {
+    const moved = v2Dist(c.pos, m.lastPos);
+    if (v2Len(f.move) < 0.5 || moved > 0.25) {
+      m.stillT = 0;
+      m.lastPos = { ...c.pos };
+      return;
+    }
+    m.stillT += dt;
+    if (m.stillT > 1.0) {
+      m.stillT = 0;
+      m.lastPos = { ...c.pos };
+      m.preyId = -1;
+      m.lastPrey = -1;
+      m.roam = null;
+      m.detourT = 0.8;
+      // 往身后/侧面随便一个空地绕一下。
+      const back = v2Add(c.pos, v2Scale(v2Norm(V2(this.rnd() - 0.5, this.rnd() - 0.5)), 1.5));
+      m.detour = v.nav.isFree(back) ? back : this.randomSpot(v);
+    }
+  }
 }

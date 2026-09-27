@@ -10,7 +10,7 @@ import { LAYOUT, INTERIOR, PLATFORM_FENCE, boardingFence, baseWalls } from '../s
 const out = {
   interior: INTERIOR,
   doors: LAYOUT.doors.map((d) => ({ id: d.id, zMin: d.zMin, zMax: d.zMax })),
-  seats: LAYOUT.seats.map((s) => ({ id: s.id, kind: s.kind, x: s.x, z: s.z, rect: s.rect, backRect: s.backRect })),
+  seats: LAYOUT.seats.map((s) => ({ id: s.id, kind: s.kind, x: s.x, z: s.z, facing: s.facing, front: s.front, cushion: s.cushion, backRect: s.backRect })),
   handrails: LAYOUT.handrails,
   obstacles: LAYOUT.obstacles,
   platform: LAYOUT.platform,

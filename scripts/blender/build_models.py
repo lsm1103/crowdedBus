@@ -455,13 +455,33 @@ def build_interior(interior):
     # 点序决定法线：(+x) × (-z) = +y，法线朝上。u 沿 +x，v 沿 -z。
     fl.quad((-X_IN, 0.014, Z_CAB), (X_IN, 0.014, Z_CAB), (X_IN, 0.014, Z_TAIL_IN), (-X_IN, 0.014, Z_TAIL_IN), 'floor')
     # 座位
-    for s in L['seats']:
-        z = s['z']
-        c = 'seat_pink' if s['kind'] == 'priority' else 'seat_teal'
-        interior.box(-2.30, -1.62, 0.0, 0.30, z - 0.42, z + 0.42, 'seat_base', bevel=0.03)
-        interior.box(-2.32, -1.42, 0.30, 0.46, z - 0.49, z + 0.49, c, bevel=0.06, segs=3)
-        interior.box(-2.36, -2.14, 0.44, 1.28, z - 0.49, z + 0.49, c, bevel=0.06, segs=3)
-        interior.cyl((-2.25, 1.34, z - 0.4), (-2.25, 1.34, z + 0.4), 0.03, 'rail_yellow', segs=8)
+    # 座位按布局数据建：座垫 = cushion，靠背 = backRect（在朝向的反侧），底座缩进一点。
+    # 朝向只有两种：+z（朝车头，前部单人座和后排长椅）、+x（朝过道，中部单人座）。
+    # 长椅的几格共用一个底座和一条靠背横杆，看起来是一整条。
+    bench = [st for st in L['seats'] if st['kind'] == 'bench']
+    for st in L['seats']:
+        cu, bk = st['cushion'], st['backRect']
+        col = 'seat_pink' if st['kind'] == 'bench' else 'seat_teal'
+        along_z = st['front']['x'] != 0  # 朝 +x 的座位，座位的"宽"沿 z
+        if st['kind'] != 'bench':
+            m = 0.08
+            interior.box(cu['minX'] + m, cu['maxX'] - m, 0.0, 0.30, cu['minZ'] + m, cu['maxZ'] - m, 'seat_base', bevel=0.03)
+        interior.box(cu['minX'], cu['maxX'], 0.30, 0.46, cu['minZ'], cu['maxZ'], col, bevel=0.06, segs=3)
+        interior.box(bk['minX'], bk['maxX'], 0.44, 1.28, bk['minZ'], bk['maxZ'], col, bevel=0.06, segs=3)
+        # 靠背顶上的黄色扶手横杆
+        if along_z:
+            x = (bk['minX'] + bk['maxX']) / 2
+            interior.cyl((x, 1.34, cu['minZ'] + 0.09), (x, 1.34, cu['maxZ'] - 0.09), 0.03, 'rail_yellow', segs=8)
+        elif st['kind'] != 'bench':
+            zz = (bk['minZ'] + bk['maxZ']) / 2
+            interior.cyl((cu['minX'] + 0.09, 1.34, zz), (cu['maxX'] - 0.09, 1.34, zz), 0.03, 'rail_yellow', segs=8)
+    if bench:
+        x0 = min(st['cushion']['minX'] for st in bench)
+        x1 = max(st['cushion']['maxX'] for st in bench)
+        c0 = bench[0]['cushion']
+        bz = (bench[0]['backRect']['minZ'] + bench[0]['backRect']['maxZ']) / 2
+        interior.box(x0 + 0.08, x1 - 0.08, 0.0, 0.30, c0['minZ'] + 0.08, c0['maxZ'] - 0.08, 'seat_base', bevel=0.03)
+        interior.cyl((x0 + 0.09, 1.34, bz), (x1 - 0.09, 1.34, bz), 0.03, 'rail_yellow', segs=8)
     # 顶部横杆 + 吊环（黄），立杆单独成节点（要高亮）
     rails = L['handrails']
     zs = sorted(h['z'] for h in rails if abs(h['x']) < 1e-6)

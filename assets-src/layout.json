@@ -20,74 +20,140 @@
   "seats": [
     {
       "id": 0,
-      "kind": "normal",
-      "x": -1.78,
-      "z": 2.45,
-      "rect": {
-        "minX": -2.35,
+      "kind": "single",
+      "x": -1.8499999999999999,
+      "z": 4.95,
+      "facing": 0,
+      "front": {
+        "x": 0,
+        "z": 1
+      },
+      "cushion": {
+        "minX": -2.3,
         "maxX": -1.4,
-        "minZ": 1.9000000000000001,
-        "maxZ": 3
+        "minZ": 4.5,
+        "maxZ": 5.4
       },
       "backRect": {
-        "minX": -2.35,
-        "maxX": -2.12,
-        "minZ": 1.9000000000000001,
-        "maxZ": 3
+        "minX": -2.3,
+        "maxX": -1.4,
+        "minZ": 4.32,
+        "maxZ": 4.5
       }
     },
     {
       "id": 1,
-      "kind": "normal",
-      "x": -1.78,
-      "z": 1.15,
-      "rect": {
-        "minX": -2.35,
+      "kind": "single",
+      "x": -1.8499999999999999,
+      "z": 3.7,
+      "facing": 0,
+      "front": {
+        "x": 0,
+        "z": 1
+      },
+      "cushion": {
+        "minX": -2.3,
         "maxX": -1.4,
-        "minZ": 0.5999999999999999,
-        "maxZ": 1.7
+        "minZ": 3.25,
+        "maxZ": 4.15
       },
       "backRect": {
-        "minX": -2.35,
-        "maxX": -2.12,
-        "minZ": 0.5999999999999999,
-        "maxZ": 1.7
+        "minX": -2.3,
+        "maxX": -1.4,
+        "minZ": 3.07,
+        "maxZ": 3.25
       }
     },
     {
       "id": 2,
-      "kind": "normal",
-      "x": -1.78,
-      "z": -1.15,
-      "rect": {
-        "minX": -2.35,
-        "maxX": -1.4,
-        "minZ": -1.7,
-        "maxZ": -0.5999999999999999
+      "kind": "single",
+      "x": -1.8699999999999999,
+      "z": 0.7,
+      "facing": 1.5707963267948966,
+      "front": {
+        "x": 1,
+        "z": 0
+      },
+      "cushion": {
+        "minX": -2.32,
+        "maxX": -1.42,
+        "minZ": 0.2,
+        "maxZ": 1.2
       },
       "backRect": {
-        "minX": -2.35,
-        "maxX": -2.12,
-        "minZ": -1.7,
-        "maxZ": -0.5999999999999999
+        "minX": -2.5,
+        "maxX": -2.32,
+        "minZ": 0.2,
+        "maxZ": 1.2
       }
     },
     {
       "id": 3,
-      "kind": "priority",
-      "x": -1.78,
-      "z": -3.7,
-      "rect": {
-        "minX": -2.35,
+      "kind": "bench",
+      "x": -1.8499999999999999,
+      "z": -5.54,
+      "facing": 0,
+      "front": {
+        "x": 0,
+        "z": 1
+      },
+      "cushion": {
+        "minX": -2.3,
         "maxX": -1.4,
-        "minZ": -4.25,
-        "maxZ": -3.1500000000000004
+        "minZ": -5.98,
+        "maxZ": -5.1
       },
       "backRect": {
-        "minX": -2.35,
-        "maxX": -2.12,
-        "minZ": -4.25,
-        "maxZ": -3.1500000000000004
+        "minX": -2.3,
+        "maxX": -1.4,
+        "minZ": -6.16,
+        "maxZ": -5.98
+      }
+    },
+    {
+      "id": 4,
+      "kind": "bench",
+      "x": -0.95,
+      "z": -5.54,
+      "facing": 0,
+      "front": {
+        "x": 0,
+        "z": 1
+      },
+      "cushion": {
+        "minX": -1.4,
+        "maxX": -0.5,
+        "minZ": -5.98,
+        "maxZ": -5.1
+      },
+      "backRect": {
+        "minX": -1.4,
+        "maxX": -0.5,
+        "minZ": -6.16,
+        "maxZ": -5.98
+      }
+    },
+    {
+      "id": 5,
+      "kind": "bench",
+      "x": -0.04999999999999999,
+      "z": -5.54,
+      "facing": 0,
+      "front": {
+        "x": 0,
+        "z": 1
+      },
+      "cushion": {
+        "minX": -0.5,
+        "maxX": 0.4,
+        "minZ": -5.98,
+        "maxZ": -5.1
+      },
+      "backRect": {
+        "minX": -0.5,
+        "maxX": 0.4,
+        "minZ": -6.16,
+        "maxZ": -5.98
       }
     }
   ],
@@ -126,39 +192,6 @@
   "obstacles": [
     {
       "id": 0,
-      "kind": "luggage",
-      "rect": {
-        "minX": 1.05,
-        "maxX": 1.95,
-        "minZ": -1.75,
-        "maxZ": -0.85
-      },
-      "height": 0.78
-    },
-    {
-      "id": 1,
-      "kind": "wheelwell",
-      "rect": {
-        "minX": 1.85,
-        "maxX": 2.35,
-        "minZ": 0.7,
-        "maxZ": 1.9
-      },
-      "height": 0.52
-    },
-    {
-      "id": 2,
-      "kind": "stroller",
-      "rect": {
-        "minX": -2.25,
-        "maxX": -1.35,
-        "minZ": 4.2,
-        "maxZ": 5.1
-      },
-      "height": 0.95
-    },
-    {
-      "id": 3,
       "kind": "bin",
       "rect": {
         "minX": 0.95,

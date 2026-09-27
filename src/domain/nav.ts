@@ -74,8 +74,15 @@ export class NavGrid {
   private budget = Infinity;
   private priority = new Set<number>();
   private deferred = new Set<number>();
-  /** 临时障碍（实心行李），每帧由模拟更新。 */
+  /** 临时障碍（站定的路人），每帧由模拟更新。 */
   private dynamic: Rect[] = [];
+  /**
+   * 临时障碍按角色半径膨胀后覆盖的格子（1 = 被占）。setDynamic 时栅格化一次，
+   * ok() 就只是查表 —— 以前每次查询都对每个障碍算一遍距离，A* 一次要查几万次，
+   * 车上站着 5~8 个路人时单步寻路最长 10ms（一帧就掉了）。
+   */
+  private dynMask: Uint8Array;
+  private dynCells: number[] = [];
 
   constructor(private layout: BusLayout, radius: number) {
     const r = layout.interior;
@@ -102,6 +109,7 @@ export class NavGrid {
       }
     }
     const n = this.cols * this.rows;
+    this.dynMask = new Uint8Array(n);
     this.gScore = new Float32Array(n);
     this.came = new Int32Array(n);
     this.stamp = new Uint32Array(n);
@@ -131,7 +139,7 @@ export class NavGrid {
 
   reset() {
     this.cache.clear();
-    this.dynamic = [];
+    this.setDynamic([]);
     this.budget = Infinity;
     this.priority = new Set();
     this.deferred = new Set();
@@ -147,17 +155,37 @@ export class NavGrid {
     this.budget = maxReplans;
   }
 
-  /** 登记本帧的临时障碍（行李只存在几秒，不重建网格，查询时现算）。 */
+  /** 登记本帧的临时障碍：和上一帧一样就不动，否则重新栅格化（只重写障碍附近的几百个格子）。 */
   setDynamic(rects: Rect[]) {
+    const same = rects.length === this.dynamic.length && rects.every((r, i) => {
+      const o = this.dynamic[i];
+      return Math.abs(r.minX - o.minX) < 1e-3 && Math.abs(r.maxX - o.maxX) < 1e-3
+        && Math.abs(r.minZ - o.minZ) < 1e-3 && Math.abs(r.maxZ - o.maxZ) < 1e-3;
+    });
+    if (same) return;
     this.dynamic = rects;
+    for (const c of this.dynCells) this.dynMask[c] = 0;
+    this.dynCells = [];
+    const need = this.need;
+    for (const r of rects) {
+      const i0 = Math.max(0, Math.floor((r.minX - need - this.x0) / CELL));
+      const i1 = Math.min(this.cols - 1, Math.ceil((r.maxX + need - this.x0) / CELL));
+      const j0 = Math.max(0, Math.floor((r.minZ - need - this.z0) / CELL));
+      const j1 = Math.min(this.rows - 1, Math.ceil((r.maxZ + need - this.z0) / CELL));
+      for (let j = j0; j <= j1; j++) {
+        for (let i = i0; i <= i1; i++) {
+          const c = j * this.cols + i;
+          if (this.dynMask[c] || distToRect(this.center(i, j), r) >= need) continue;
+          this.dynMask[c] = 1;
+          this.dynCells.push(c);
+        }
+      }
+    }
   }
 
   /** 格子可站：静态可站，且不压在临时障碍上。 */
   private ok(c: number): boolean {
-    if (!this.free[c]) return false;
-    if (!this.dynamic.length) return true;
-    const p = this.centerOf(c);
-    return this.dynamic.every((r) => distToRect(p, r) >= this.need);
+    return this.free[c] === 1 && this.dynMask[c] === 0;
   }
 
   private center(i: number, j: number): Vec2 {

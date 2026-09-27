@@ -1,26 +1,38 @@
-/** 随机事件池（对应 docs/02-game-design.md 第 7 节）。 */
-export type EventKind = 'brake' | 'turn' | 'boarding' | 'luggage' | 'doorfault';
+/**
+ * 场景机关（docs/08 第 3.4 节）：两站之间随机出现 1~2 个，预警后生效，车门此时是关着的。
+ * 它们本身不把人甩下车，作用是把没抓稳的人晃倒 —— 下一站一开门，躺在地上的人就是猎物。
+ */
+export type EventKind = 'brake' | 'turn' | 'bump';
 
 export interface EventDef {
   kind: EventKind;
   label: string;
   warnText: string;
-  /** 作用持续时间（秒）；brake/turn 为瞬时冲量 + 短滑动。 */
+  /** 生效时长（秒）。急转弯的实际时长由 BALANCE.turnDuration 决定。 */
   duration: number;
-  /** 是否扩大车门危险区。 */
-  expandDoor?: 'front' | 'back';
 }
 
 export const EVENTS: Record<EventKind, EventDef> = {
-  // 急刹：这一站刹得更猛（见 BALANCE.emergencyBrakeRate），推人的是刹车本身的惯性，
-  // 不再是预警结束后补一下的冲量。duration 只用来让事件在界面上多挂一会儿。
-  brake: { kind: 'brake', label: '急刹车', warnText: '急刹车，抓稳扶手！', duration: 1.1 },
-  // 急转弯不在到站事件池里：它在行驶途中（车速接近满速时）单独触发，方向写进横幅，
-  // duration 由 BALANCE.turnDuration 决定，这里的值不用。
-  turn: { kind: 'turn', label: '急转弯', warnText: '前方急转弯！', duration: 1.2 },
-  boarding: { kind: 'boarding', label: '下一站上人', warnText: '人更多了！', duration: 1.0 },
-  luggage: { kind: 'luggage', label: '大件行李', warnText: '小心行李！', duration: 2.5 },
-  // expandDoor 交给运行时按对局种子决定：写死在模块里会让整场游戏永远开同一扇门，
-  // 也破坏了 Simulation 里 mulberry32 的确定性。
-  doorfault: { kind: 'doorfault', label: '车门故障', warnText: '车门危险区扩大！', duration: 4 }
+  // 急刹：车速从满速猛降到 BALANCE.brakeHazardFloor 再恢复，全车往车头冲。
+  brake: { kind: 'brake', label: '急刹车', warnText: '前方急刹，抓稳扶手！', duration: 1.0 },
+  // 急转弯：横向甩一下，方向写进横幅。
+  turn: { kind: 'turn', label: '急转弯', warnText: '前方急转弯，抓稳！', duration: 1.2 },
+  // 颠簸：全车一起踉跄两下。
+  bump: { kind: 'bump', label: '颠簸', warnText: '前方路面颠簸！', duration: 0.6 }
 };
+
+/**
+ * 到站类型的文案。键与 domain/types.ts 的 StationKind 一致
+ * （这里不从 domain 引类型，免得 config 反向依赖 domain）。
+ */
+export const STATION_TEXT = {
+  board: { label: '上客', banner: '到站 · 上客潮！路人要挤上来了' },
+  alight: { label: '下客', banner: '到站 · 下客潮！别挡在门口' },
+  normal: { label: '停靠', banner: '到站 · 车门打开，离门口远点！' }
+} as const;
+
+/** 途经站名（每回合随机挑 4 个）与终点站名。 */
+export const STATION_NAMES = [
+  '梧桐路', '人民广场', '菜市场', '科技园', '体育中心', '老街口', '图书馆', '滨江公园'
+] as const;
+export const TERMINAL_NAME = '火车站';

@@ -55,7 +55,7 @@ const wrapZ = (z: number, len: number) => ((((z + len / 2) % len) + len) % len) 
  * 候车亭里等车的路人：一个合并网格 + 顶点色，每人一次 draw call。
  * 身材比可玩角色小一号、颜色偏灰，一眼能分清"这是背景，不是对手"。
  */
-function makeNpc(body: number, hair: number): THREE.BufferGeometry {
+export function makeNpc(body: number, hair: number): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const paint = (g: THREE.BufferGeometry, hex: number) => {
     const c = new THREE.Color(hex);
@@ -93,17 +93,6 @@ const NPC_SPOTS: { x: number; z: number; rot: number; body: number; hair: number
   { x: -0.25, z: -2.55, rot: -Math.PI / 2 + 0.2, body: 0x7fae9a, hair: 0x6b6b6b }
 ];
 
-/** 路人走路速度（格/秒）与上车时的起跳高度。 */
-const NPC_WALK = 2.4;
-
-interface Walker {
-  mesh: THREE.Mesh;
-  path: THREE.Vector3[];
-  seg: number;
-  delay: number;
-  vanish: number;
-}
-
 export class SceneryView {
   root = new THREE.Group();
 
@@ -116,9 +105,7 @@ export class SceneryView {
   private stopZ0 = 0;
   private stopAge = 0;
   private npcs: { mesh: THREE.Mesh; home: THREE.Vector3; rot: number }[] = [];
-  /** 等车停稳后上车的那扇门（车厢坐标 z）；null = 没有待上的人。 */
-  private pendingBoard: number | null = null;
-  private walkers: Walker[] = [];
+
 
   private distance = 0;
   private busSpeed = 0;
@@ -301,84 +288,15 @@ export class SceneryView {
 
   /** 路人全部回到候车亭里站好（每次新到一站都重置）。 */
   private resetNpcs() {
-    for (const w of this.walkers) this.root.remove(w.mesh);
-    this.walkers = [];
-    this.pendingBoard = null;
-    for (const n of this.npcs) {
-      this.stop?.add(n.mesh);
-      n.mesh.position.copy(n.home);
-      n.mesh.rotation.set(0, n.rot, 0);
-      n.mesh.scale.setScalar(1);
-      n.mesh.visible = true;
-    }
+    for (const n of this.npcs) n.mesh.visible = true;
   }
 
   /**
-   * "上人"事件：等车停稳后，候车亭里两个路人走到开着的门口、跳上车挤进去。
-   * 模拟层那边是一次把所有人往里挤的冲量；这里只负责让玩家看见"真的上来人了"。
+   * 上客潮：候车亭里等车的人"上车了"，把他们藏起来。
+   * 真正上车的路人由规则层生成、画在车厢里（view/npcs.ts）。
    */
-  playBoarding(doorZ: number) {
-    if (this.stop?.visible) this.pendingBoard = doorZ;
-  }
-
-  private startBoarding(doorZ: number) {
-    const picks = this.npcs.slice(0, 2);
-    picks.forEach((n, i) => {
-      const start = n.mesh.getWorldPosition(new THREE.Vector3());
-      this.root.attach(n.mesh);
-      const side = i === 0 ? -0.35 : 0.35;
-      this.walkers.push({
-        mesh: n.mesh,
-        path: [
-          start,
-          // 先从候车亭敞开的正面（朝马路）走出来，再拐向车门；直接斜穿会穿过侧面的玻璃。
-          new THREE.Vector3(WORLD.curbNearX + 0.3, start.y, start.z),
-          new THREE.Vector3(WORLD.curbNearX - 0.25, WORLD.groundY, doorZ + side),
-          new THREE.Vector3(2.75, WORLD.groundY, doorZ + side * 0.5),
-          new THREE.Vector3(2.3, 0, doorZ + side * 0.3)
-        ],
-        seg: 0,
-        delay: i * 0.45,
-        vanish: 0
-      });
-    });
-  }
-
-  private updateWalkers(dt: number) {
-    for (const w of this.walkers) {
-      if (w.delay > 0) {
-        w.delay -= dt;
-        continue;
-      }
-      const m = w.mesh;
-      if (w.seg >= w.path.length - 1) {
-        // 挤进门里：缩一下就没了（卡通式的"被人潮吞掉"）。
-        w.vanish += dt / 0.25;
-        m.scale.setScalar(Math.max(0.001, 1 - w.vanish));
-        m.visible = w.vanish < 1;
-        continue;
-      }
-      const a = w.path[w.seg];
-      const b = w.path[w.seg + 1];
-      const to = b.clone().sub(m.position);
-      to.y = 0;
-      const step = NPC_WALK * dt;
-      const flat = Math.hypot(to.x, to.z);
-      m.rotation.y = Math.atan2(to.x, to.z);
-      if (flat <= step) {
-        m.position.set(b.x, b.y, b.z);
-        w.seg++;
-      } else {
-        m.position.x += (to.x / flat) * step;
-        m.position.z += (to.z / flat) * step;
-      }
-      // 从马路跳上车门踏板：最后一段按水平进度插出一个小抛物线。
-      const segLen = Math.hypot(b.x - a.x, b.z - a.z) || 1;
-      const u = 1 - Math.min(1, Math.hypot(b.x - m.position.x, b.z - m.position.z) / segLen);
-      m.position.y = a.y + (b.y - a.y) * u + (b.y > a.y ? Math.sin(Math.PI * u) * 0.35 : 0);
-      // 走路时一颠一颠的。
-      if (b.y === a.y) m.position.y += Math.abs(Math.sin(performance.now() * 0.018)) * 0.05;
-    }
+  hideWaiting() {
+    for (const n of this.npcs) n.mesh.visible = false;
   }
 
   /** 用来让开镜头附近的树和路灯；不设置时不做处理。 */
@@ -466,11 +384,6 @@ export class SceneryView {
       this.resetNpcs();
     }
     if (!s.visible) return;
-    if (this.pendingBoard !== null && this.busSpeed < 0.12) {
-      this.startBoarding(this.pendingBoard);
-      this.pendingBoard = null;
-    }
-    this.updateWalkers(dt);
     this.stopAge += dt;
     const z = this.stopZ0 - this.distance;
     const t = Math.min(1, this.stopAge / 0.4);

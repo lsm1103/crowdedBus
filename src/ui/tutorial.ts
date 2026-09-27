@@ -2,7 +2,8 @@ import type { GameEvent, Snapshot } from '../domain/types';
 import { skipTutorial } from '../core/storage';
 
 /**
- * 首局引导。
+ * 首局引导（docs/08 第 6.5 节）：第一回合里依次教会
+ * 上车 → 抓扶手 → 推人 → 把摔倒的人拖到车门扔出去 → 坐下与拽人。
  *
  * 三条设计约束：
  * 1. **不做全屏遮罩**。摇杆是"左半屏任意位置动态起按"，任何盖在上面的遮罩都会
@@ -12,26 +13,43 @@ import { skipTutorial } from '../core/storage';
  * 3. 每条都能被玩家的动作**提前结束**，不是干等超时。
  *
  * 两类步骤：
- * - **顺序步骤**：一条接一条。每条都有等待上限，等不到触发条件就跳过；
- *   以前"黄圈"那条要求"没坐下"，玩家照着教学抢到座后（实测 99.5% 能坐到终局）
- *   这条永远等不到，后面"推挤/门口/抓扶手"全部丢失。
- * - **插队步骤**：条件一满足就立刻打断当前气泡。"门开了会淘汰""终局抓扶手"
- *   是保命信息，不能排在"去黄圈"后面等 —— 以前门口警告要等前 4 条讲完，
- *   而且只在"到站那一帧"触发，常常赶不上第一、二站，排晚了还会永远卡住。
+ * - **顺序步骤**：一条接一条。每条都有等待上限，等不到触发条件就跳过，
+ *   不能让一条等不到的条件把后面的步骤全卡死。
+ * - **插队步骤**：条件一满足就立刻打断当前气泡。"车门开着"是全车的击杀窗口、
+ *   "好挤模式"两门全开，都是保命信息，不能排在后面等。
  *
- * 触发条件全部挂在已有的 phase / snapshot / GameEvent 上，不新增任何模拟逻辑。
+ * 按钮只在"按了一定有用"时才闪（pulseIf），闪了按不出东西，玩家第一次尝试就学到错误结论。
+ * 触发条件全部挂在 Snapshot / GameEvent 上，不新增任何模拟逻辑。
+ *
+ * 一回合没讲完（比如玩家早早被扔下车）会接着在下一回合讲；session 想只教第一回合，
+ * 在第一回合结束时调 stop() 即可。
  */
+
+interface Ctx {
+  /** 玩家的角色 id。 */
+  pid: number;
+  t: number;
+  /** 玩家累计推 / 撞中别人的次数。 */
+  hits: number;
+  /** 当前这一条出现时的 hits，用来数"出现之后推中了几下"。 */
+  hitsAtShow: number;
+  /** 最近一次有人摔倒的时刻。 */
+  lastDownAt: number;
+}
 
 interface Step {
   id: string;
-  text: string;
+  /** 文案可以跟着局面变（比如车门开没开）。 */
+  text: string | ((s: Snapshot) => string);
   /** 要高亮的按钮选择器。 */
   pulse?: string;
+  /** 只有这时才闪（缺省一直闪）。 */
+  pulseIf?(s: Snapshot): boolean;
   /** 什么时候该出这一条。 */
-  when(s: Snapshot, ev: GameEvent[]): boolean;
+  when(s: Snapshot, c: Ctx): boolean;
   /** 什么时候算学会了。 */
-  done(s: Snapshot, ev: GameEvent[]): boolean;
-  /** 条件满足时这一条已经没意义，直接跳过（例如已经坐下就不教"没座去黄圈"）。 */
+  done(s: Snapshot, ev: GameEvent[], c: Ctx): boolean;
+  /** 条件满足时这一条已经没意义，直接跳过。 */
   skip?(s: Snapshot): boolean;
   /** 显示后的兜底超时（秒）。 */
   timeout: number;
@@ -39,8 +57,11 @@ interface Step {
   waitLimit: number;
 }
 
-const has = (ev: GameEvent[], t: GameEvent['type']) => ev.some((e) => e.type === t);
 const riding = (s: Snapshot) => s.phase === 'ignition' || s.phase === 'driving';
+/** 站着、空手、能出手。 */
+const freeHands = (s: Snapshot) => !s.playerSeated && s.playerHold === 'none';
+/** "抓"这一下能抓到东西（伸手范围里有人或扶手）。 */
+const canGrab = (s: Snapshot) => s.interactHint === 'grab';
 
 const SEQUENCE: Step[] = [
   {
@@ -52,49 +73,66 @@ const SEQUENCE: Step[] = [
     timeout: 6,
     waitLimit: 3
   },
-  // 抢座这件事拆成"走过去"和"按下去"两条。
-  // 原来合成一条、并且从头就让 #btn-grab 闪：玩家离座位十万八千里就去按，
-  // 只会得到"抓空"，第一次尝试就学到了错误结论 —— 座位系统对我不开放。
   {
-    id: 'seat-find',
-    // 不说"左边"：越肩镜头跟着人转，面朝车头时座位在右手边。看不见时屏幕边有绿箭头指路。
-    text: '绿色光柱就是空座，走过去 · 看不见就跟着绿箭头',
-    // 得真有空座才说"走过去"；满座时这条会把人引向一个不存在的目标。
-    when: (s) => riding(s) && s.playerSeat === null && s.seatGuide !== null,
-    done: (s) => s.interactHint === 'sit' || s.playerSeat !== null,
-    skip: (s) => s.playerSeat !== null,
-    timeout: 8,
-    waitLimit: 6
-  },
-  {
-    id: 'seat-sit',
-    text: '按【坐下】占座 · 坐着每一秒都在得分',
+    id: 'rail',
+    text: '车要晃了！靠近扶手点【抓】· 抓着就晃不倒，再点一下松手',
     pulse: '#btn-grab',
-    // 只有真的能坐时才闪按钮，这样"闪 = 按了一定有用"永远成立。
-    when: (s) => s.interactHint === 'sit',
-    done: (s) => s.playerSeat !== null,
-    skip: (s) => s.playerSeat !== null,
-    timeout: 6,
-    // 走不到座位就 4 秒后跳过。等太久会在中间留出一段没有任何引导的空窗。
-    waitLimit: 4
-  },
-  {
-    id: 'zone',
-    text: '没抢到座就去黄圈里站着 · 人越多分越少',
-    when: (s) => s.phase === 'driving' && s.playerSeat === null,
-    done: (s) => s.playerInZone,
-    // 坐着的人不需要这条；以前它会一直等到玩家站起来。
-    skip: (s) => s.playerSeat !== null,
-    timeout: 6,
+    pulseIf: canGrab,
+    when: (s) => riding(s) && freeHands(s),
+    // 抓住人也算学会了"抓"。
+    done: (s) => s.playerHold !== 'none',
+    skip: (s) => s.playerSeated,
+    timeout: 7,
     waitLimit: 5
   },
   {
     id: 'push',
-    text: '按 💥 推人有分：往门口推、连推三下把坐着的人拽起来',
+    text: '按【推】撞人 · 连推几下就能把人推倒',
     pulse: '#btn-push',
-    when: (s) => s.phase === 'driving' && s.playerSeat === null,
-    done: (_s, ev) => has(ev, 'push'),
+    pulseIf: (s) => !s.playerSeated,
+    when: (s) => s.phase === 'driving' && !s.playerSeated,
+    done: (_s, ev, c) =>
+      ev.some((e) => e.type === 'knockdown' && e.byId === c.pid) || c.hits - c.hitsAtShow >= 3,
+    timeout: 8,
+    waitLimit: 6
+  },
+  {
+    id: 'drag',
+    text: '有人摔倒了！趁他瘫着，点【抓】把他拎起来',
+    pulse: '#btn-grab',
+    pulseIf: canGrab,
+    // 摔倒只瘫 1.6 秒，这条只在有人刚摔倒时出。
+    when: (s, c) => s.phase === 'driving' && freeHands(s) && c.t - c.lastDownAt < 1.6,
+    done: (s) => s.playerHoldingDown,
+    skip: (s) => s.playerHoldingDown && s.playerHold === 'char',
     timeout: 6,
+    waitLimit: 12
+  },
+  {
+    id: 'throw',
+    text: (s) => s.doorsOpen
+      ? '车门开着！拖到门口按【扔】，把他扔下车'
+      : '拖着他等车门打开，到门口按【扔】',
+    pulse: '#btn-push',
+    // 车门开着才闪：关着门扔只会把人甩到墙上。
+    pulseIf: (s) => s.doorsOpen,
+    when: (s) => s.playerHold === 'char' && s.playerHoldingDown,
+    done: (_s, ev, c) => ev.some((e) => e.type === 'throw' && e.byId === c.pid),
+    timeout: 10,
+    // 上一条被跳过（没人摔倒 / 没抓起来）时，这条再等 4 秒就算了。
+    waitLimit: 4
+  },
+  {
+    id: 'seat',
+    text: (s) => s.playerSeated
+      ? '坐着最稳，但推不了也冲不了 · 小心被人拽起来'
+      : '坐下最稳但不能出手 · 抓住坐着的人不放，能把他拽起来',
+    pulse: '#btn-grab',
+    pulseIf: (s) => s.interactHint === 'sit',
+    when: (s) => s.phase === 'driving' && (s.playerSeated || s.playerHold === 'none'),
+    done: (_s, ev, c) => ev.some((e) =>
+      (e.type === 'sit' && e.charId === c.pid) || (e.type === 'yank' && e.byId === c.pid)),
+    timeout: 8,
     waitLimit: 8
   }
 ];
@@ -103,20 +141,21 @@ const SEQUENCE: Step[] = [
 const URGENT: Step[] = [
   {
     id: 'door',
-    // 这一条最关键：玩家目前根本不知道自己为什么会死。
-    text: '门开了！别站在门口 · 被挤出车门就淘汰',
-    // 电平触发：只要行驶中有门开着就出，不再依赖"到站那一帧"的事件。
-    when: (s) => s.phase === 'driving' && s.doorsOpen,
-    done: (s) => !s.doorsOpen,
+    text: '车门开了！这时能把人扔出去 · 你也离门口远点',
+    // 电平触发：只要行驶中有门开着就出，不依赖"到站那一帧"的事件。
+    // 已经拖着摔倒的人时让给"扔"那一条，它讲的正是这件事。
+    when: (s) => s.phase === 'driving' && s.doorsOpen && !s.playerHoldingDown,
+    done: (s) => !s.doorsOpen || s.playerHoldingDown,
     timeout: 4,
     waitLimit: Infinity
   },
   {
-    id: 'grab',
-    text: '终点摇摆！走到扶手旁按一下【抓住】· 受力 -70%',
+    id: 'finale',
+    text: '好挤模式！两扇门全开 · 抓紧扶手别被甩出去',
     pulse: '#btn-grab',
+    pulseIf: canGrab,
     when: (s) => s.phase === 'finale',
-    done: (s) => s.playerRail !== null,
+    done: (s) => s.playerHold === 'rail' || s.playerSeated,
     timeout: 5,
     waitLimit: Infinity
   }
@@ -134,8 +173,11 @@ export class Tutorial {
   private urgent: Step | null = null;
   private urgentAt = 0;
   private urgentDone = new Set<string>();
+  private ctx: Ctx;
 
-  constructor(private root: HTMLElement) {
+  /** playerId：玩家角色的 id（session 里玩家固定是 0）。 */
+  constructor(private root: HTMLElement, playerId = 0) {
+    this.ctx = { pid: playerId, t: 0, hits: 0, hitsAtShow: 0, lastDownAt: -Infinity };
     this.bubble = root.querySelector('#tut-bubble') as HTMLElement;
     this.skipBtn = root.querySelector('#tut-skip') as HTMLElement;
     this.skipBtn.classList.remove('hidden');
@@ -148,9 +190,15 @@ export class Tutorial {
   /** 每个模拟步喂快照和本步事件。 */
   update(s: Snapshot, ev: GameEvent[], t: number) {
     if (this.finished) return;
+    const c = this.ctx;
+    c.t = t;
+    for (const e of ev) {
+      if (e.type === 'hit' && e.byId === c.pid) c.hits++;
+      else if (e.type === 'knockdown' && e.charId !== c.pid) c.lastDownAt = t;
+    }
 
-    // 人不在场（返场途中/已出局）就先收起气泡，别对着观战画面讲操作。
-    if (!s.playerAlive) {
+    // 人不在场（已被扔下车）或回合已结束：先收起气泡，别对着观战画面讲操作。
+    if (!s.playerAlive || s.phase === 'ended') {
       this.hideBubble();
       if (this.urgent) this.finishUrgent();
       this.shownAt = -1;
@@ -160,15 +208,20 @@ export class Tutorial {
 
     // 1) 插队步骤优先。
     if (this.urgent) {
-      if (this.urgent.done(s, ev) || t - this.urgentAt > this.urgent.timeout) {
+      if (this.urgent.done(s, ev, c) || t - this.urgentAt > this.urgent.timeout) {
         this.finishUrgent();
         // 插队期间不计顺序步骤的等待时间。
         this.pendingSince = t;
+      } else {
+        this.paint(this.urgent, s);
       }
       return;
     }
-    const hot = URGENT.find((u) => !this.urgentDone.has(u.id) && u.when(s, ev));
-    if (hot) {
+    const hot = URGENT.find((u) => !this.urgentDone.has(u.id) && u.when(s, c));
+    // 玩家已经做到了（比如好挤模式开始时本来就坐着）：记为讲过，不闪一帧气泡。
+    if (hot && hot.done(s, ev, c)) {
+      this.urgentDone.add(hot.id);
+    } else if (hot) {
       this.urgent = hot;
       this.urgentAt = t;
       // 被打断的顺序步骤：已经讲了一半以上就算讲过，否则等插队讲完再完整出一次。
@@ -176,43 +229,50 @@ export class Tutorial {
       if (cur && this.shownAt >= 0 && t - this.shownAt > cur.timeout / 2) this.idx++;
       this.shownAt = -1;
       this.pendingSince = t;
-      this.render(hot);
+      this.paint(hot, s);
       return;
     }
 
     // 2) 顺序步骤。
     const step = SEQUENCE[this.idx];
     if (!step) {
+      // 顺序步骤讲完了：剩下的插队步骤都很短，"跳过教学"不必再挂着。
+      this.skipBtn.classList.add('hidden');
       if (this.urgentDone.size >= URGENT.length) this.stop();
       return;
     }
     if (this.pendingSince < 0) this.pendingSince = t;
     if (step.skip?.(s)) return this.next(t);
     if (this.shownAt < 0) {
-      if (!step.when(s, ev)) {
+      if (!step.when(s, c)) {
         // 玩家自己先做到了就直接跳过，不要为了"讲完"而干等。
-        if (step.done(s, ev)) return this.next(t);
+        if (step.done(s, ev, c)) return this.next(t);
         // 等不到触发条件也要跳过，别把后面的步骤一起卡死。
         if (t - this.pendingSince > step.waitLimit) this.next(t);
         return;
       }
       this.shownAt = t;
-      this.render(step);
+      c.hitsAtShow = c.hits;
+      this.paint(step, s);
       return;
     }
-    if (step.done(s, ev) || t - this.shownAt > step.timeout) this.next(t);
+    if (step.done(s, ev, c) || t - this.shownAt > step.timeout) this.next(t);
+    else this.paint(step, s);
   }
 
-  private render(step: Step) {
-    this.bubble.textContent = step.text;
+  /** 显示/刷新气泡：文案和按钮脉冲都可能随局面变。 */
+  private paint(step: Step, s: Snapshot) {
+    const text = typeof step.text === 'function' ? step.text(s) : step.text;
+    if (this.bubble.textContent !== text) this.bubble.textContent = text;
     this.bubble.classList.add('show');
+    const want = step.pulse && (step.pulseIf?.(s) ?? true)
+      ? this.root.querySelector(step.pulse) as HTMLElement | null
+      : null;
+    if (want === this.pulsing) return;
     this.clearPulse();
-    if (step.pulse) {
-      const el = this.root.querySelector(step.pulse) as HTMLElement | null;
-      if (el) {
-        el.classList.add('tut-pulse');
-        this.pulsing = el;
-      }
+    if (want) {
+      want.classList.add('tut-pulse');
+      this.pulsing = want;
     }
   }
 
